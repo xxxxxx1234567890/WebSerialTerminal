@@ -1,0 +1,14 @@
+{
+  "name": "tftp-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "generate-icons": "node generate-icons.js"
+  },
+  "dependencies": {
+    "jimp": "^1.6.1",
+    "sharp": "^0.34.5",
+    "ws": "^8.16.0"
+  }
+}

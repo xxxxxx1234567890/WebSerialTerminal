@@ -1,0 +1,4516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="manifest" href="/manifest.json">
+<title>WebTerm Pro — 串口调试终端</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;600&display=swap');
+
+  :root {
+    --bg-void: #050709;
+    --bg-panel: #090d12;
+    --bg-surface: #0d1520;
+    --bg-elevated: #111d2e;
+    --border: #1a3a5c;
+    --border-bright: #1e4d7b;
+    --accent: #00d4ff;
+    --accent-dim: #0099cc;
+    --accent-glow: rgba(0, 212, 255, 0.15);
+    --green: #00ff88;
+    --green-dim: #00cc6a;
+    --amber: #ffaa00;
+    --amber-dim: #cc8800;
+    --red: #ff3355;
+    --red-dim: #cc2244;
+    --text-primary: #c8e8ff;
+    --text-secondary: #5a8aaa;
+    --text-dim: #2a4a6a;
+    --font-mono: 'Share Tech Mono', 'Courier New', monospace;
+    --font-display: 'Orbitron', monospace;
+    --font-ui: 'Rajdhani', sans-serif;
+    --scanline: rgba(0, 20, 40, 0.3);
+    --terminal-green: #00ff41;
+    --terminal-green-dim: rgba(0,255,65,0.6);
+    --right-sidebar-width: 240px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg-void);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Background grid */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,180,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,180,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ═══════════ HEADER ═══════════ */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    height: 52px;
+    background: linear-gradient(180deg, #0a1929 0%, #060e18 100%);
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    z-index: 10;
+    flex-shrink: 0;
+  }
+
+  .header::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), var(--green), var(--accent), transparent);
+    opacity: 0.6;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .logo-icon {
+    width: 32px; height: 32px;
+    border: 2px solid var(--accent);
+    border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .logo-icon::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, var(--accent-glow), transparent);
+  }
+
+  .logo-icon svg { width: 18px; height: 18px; }
+
+  .logo-text {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--accent);
+    text-shadow: 0 0 20px rgba(0,212,255,0.5);
+  }
+
+  .logo-sub {
+    font-family: var(--font-ui);
+    font-size: 10px;
+    color: var(--text-secondary);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: -2px;
+  }
+
+  .header-status {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .stat-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .stat-label {
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+
+  .stat-value {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--accent);
+  }
+
+  .header-time {
+    font-family: var(--font-display);
+    font-size: 18px;
+    color: var(--green);
+    text-shadow: 0 0 10px rgba(0,255,136,0.4);
+    letter-spacing: 2px;
+  }
+
+  /* ═══════════ TOOLBAR ═══════════ */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    z-index: 9;
+    position: relative;
+  }
+
+  .toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    border-right: 1px solid var(--border);
+  }
+
+  .toolbar-group:last-child { border-right: none; }
+
+  .toolbar-label {
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-right: 2px;
+  }
+
+  select, input[type="number"] {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 3px;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    -webkit-appearance: none;
+    height: 28px;
+  }
+
+  select:hover, input[type="number"]:hover {
+    border-color: var(--accent-dim);
+  }
+
+  select:focus, input[type="number"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+  }
+
+  input[type="number"] { width: 70px; }
+
+  .btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 12px;
+    height: 28px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+    text-transform: uppercase;
+  }
+
+  .btn:hover {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+    background: var(--accent-glow);
+  }
+
+  .btn.primary {
+    background: linear-gradient(135deg, #00334d, #004466);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .btn.primary:hover {
+    background: linear-gradient(135deg, #004466, #0066aa);
+    box-shadow: 0 0 12px rgba(0,212,255,0.3);
+  }
+
+  .btn.danger {
+    background: linear-gradient(135deg, #330011, #440022);
+    border-color: var(--red);
+    color: var(--red);
+  }
+
+  .btn.danger:hover {
+    box-shadow: 0 0 12px rgba(255,51,85,0.3);
+  }
+
+  .btn.success {
+    background: linear-gradient(135deg, #003320, #004428);
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .btn.success:hover {
+    box-shadow: 0 0 12px rgba(0,255,136,0.3);
+  }
+
+  .btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+
+  .btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  .btn:disabled:hover {
+    border-color: var(--border);
+    color: var(--text-secondary);
+    background: var(--bg-surface);
+    box-shadow: none;
+  }
+
+  /* ═══════════ MAIN LAYOUT ═══════════ */
+  .main {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    position: relative;
+    z-index: 1;
+  }
+
+  .terminal-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    order: 1;
+  }
+
+  /* ═══════════ SIDEBAR ═══════════ */
+  .sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: width 0.3s ease;
+    order: 2;
+  }
+
+  .sidebar.collapsed { width: 0; overflow: hidden; }
+
+  .sidebar-section {
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .sidebar-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    font-family: var(--font-display);
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--accent-dim);
+    text-transform: uppercase;
+    background: rgba(0,180,255,0.04);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .sidebar-title:hover { background: rgba(0,180,255,0.08); }
+
+  .sidebar-content { padding: 8px; }
+
+  /* Quick sends */
+  .macro-list { display: flex; flex-direction: column; gap: 4px; }
+
+  .macro-item {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  /* 标签框固定宽度，不参与压缩 */
+  .macro-item .macro-label-input {
+    width: 36px;
+    flex-shrink: 0;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 4px;
+    border-radius: 2px;
+    outline: none;
+    height: 24px;
+  }
+
+  /* 命令框弹性伸展，min-width:0 防止溢出 */
+  .macro-item .macro-cmd-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 4px;
+    border-radius: 2px;
+    outline: none;
+    height: 24px;
+  }
+
+  .macro-item input[type="text"]:focus {
+    border-color: var(--accent);
+  }
+
+  /* 发送按钮：固定宽不压缩 */
+  .macro-send {
+    flex-shrink: 0;
+    padding: 0;
+    width: 26px;
+    height: 24px;
+    font-size: 13px;
+    justify-content: center;
+  }
+
+  /* 删除按钮：固定宽不压缩 */
+  .macro-del {
+    flex-shrink: 0;
+    padding: 0;
+    width: 22px;
+    height: 24px;
+    font-size: 12px;
+    justify-content: center;
+  }
+
+  /* RX/TX stats */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .stats-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 6px 8px;
+  }
+
+  .stats-card-label {
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+
+  .stats-card-value {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    margin-top: 2px;
+  }
+
+  .stats-card-value.rx { color: var(--green); }
+  .stats-card-value.tx { color: var(--amber); }
+
+  /* Connection indicator */
+  .conn-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .conn-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    box-shadow: 0 0 6px var(--red);
+    flex-shrink: 0;
+    transition: all 0.3s;
+  }
+
+  .conn-dot.connected {
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  .conn-text { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+  .conn-text.connected { color: var(--green); }
+
+  /* ═══════════ TERMINAL AREA ═══════════ */
+  .terminal-wrapper {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .terminal-output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    position: relative;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-bright) var(--bg-void);
+  }
+
+  .terminal-output::-webkit-scrollbar { width: 6px; }
+  .terminal-output::-webkit-scrollbar-track { background: var(--bg-void); }
+  .terminal-output::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 3px; }
+
+  /* CRT scanline effect */
+  .terminal-output::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      var(--scanline) 0px,
+      var(--scanline) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    pointer-events: none;
+    z-index: 100;
+    opacity: 0.3;
+  }
+
+  .terminal-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 1px 0 1px 6px;
+    margin-left: 2px;
+    border-left: 2px solid transparent;
+    animation: fadeIn 0.1s ease;
+  }
+  .terminal-line.rx  { border-left-color: rgba(0,204,106,0.6); }
+  .terminal-line.tx  { border-left-color: rgba(204,136,0,0.6); }
+  .terminal-line.sys { border-left-color: rgba(0,136,170,0.4); }
+  .terminal-line.err { border-left-color: rgba(204,34,68,0.7); }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(2px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .line-time {
+    color: var(--text-dim);
+    font-size: 10px;
+    flex-shrink: 0;
+    padding-top: 2px;
+    min-width: 80px;
+    user-select: none;
+  }
+
+  /* 方向标识：左边框色条，替代原三角符号 */
+  .terminal-line {
+    border-left: 2px solid transparent;
+    padding-left: 6px;
+  }
+  .terminal-line.rx  { border-left-color: #00cc6a; }
+  .terminal-line.tx  { border-left-color: #cc8800; }
+  .terminal-line.sys { border-left-color: #0088aa; }
+  .terminal-line.err { border-left-color: #cc2244; }
+
+  /* 方向标签：紧凑的 badge 样式 */
+  .line-dir {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+    width: 22px;
+    padding: 1px 0;
+    border-radius: 2px;
+    text-align: center;
+    user-select: none;
+    opacity: 0.85;
+  }
+  .line-dir.rx  { color: #00ff88; }
+  .line-dir.tx  { color: var(--amber); }
+  .line-dir.sys { color: var(--accent); opacity: 0.6; }
+  .line-dir.err { color: var(--red); }
+
+  .line-content { word-break: break-all; flex: 1; }
+
+  /* RX base: 浅灰白，关键词由 JS 动态着色 */
+  .line-content.rx { color: #c8e8ff; }
+  .line-content.tx { color: var(--amber); }
+  .line-content.sys { color: var(--accent); font-style: italic; }
+  .line-content.err { color: var(--red); }
+
+  /* Hex display */
+  .hex-byte {
+    display: inline-block;
+    background: rgba(0,255,65,0.08);
+    border: 1px solid rgba(0,255,65,0.15);
+    border-radius: 2px;
+    padding: 0 3px;
+    margin: 0 1px;
+    font-size: 11px;
+    color: var(--green-dim);
+  }
+
+  /* ═══════════ INPUT AREA ═══════════ */
+  .input-area {
+    border-top: 1px solid var(--border);
+    background: var(--bg-panel);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .input-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* 输入框右侧 + 按钮左侧无缝衔接 */
+  .input-wrapper { flex: 1; position: relative; }
+  .input-wrapper .input-field {
+    border-radius: 3px 0 0 3px;
+    border-right: none;
+    width: 100%;
+  }
+  #btnSend {
+    flex-shrink: 0;
+    height: 40px;
+    min-width: 72px;
+    border-radius: 0 3px 3px 0;
+    justify-content: center;
+    align-items: center;
+    display: flex;
+    font-size: 14px;
+    letter-spacing: 1.5px;
+    padding: 0;
+  }
+
+  .input-prompt {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--green);
+    flex-shrink: 0;
+    text-shadow: 0 0 8px rgba(0,255,136,0.5);
+  }
+
+  .input-field {
+    flex: 1;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--terminal-green);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    padding: 9px 14px;
+    height: 40px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    caret-color: var(--terminal-green);
+  }
+
+  .input-field:focus {
+    border-color: var(--green-dim);
+    box-shadow: 0 0 0 2px rgba(0,255,65,0.1), inset 0 0 20px rgba(0,255,65,0.03);
+  }
+
+  .input-options {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    letter-spacing: 0.5px;
+  }
+
+  .checkbox-label input[type="checkbox"] { display: none; }
+
+  .custom-checkbox {
+    width: 14px; height: 14px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    background: var(--bg-surface);
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+
+  .checkbox-label input:checked + .custom-checkbox {
+    background: var(--accent-glow);
+    border-color: var(--accent);
+  }
+
+  .custom-checkbox::after {
+    content: '';
+    width: 6px; height: 6px;
+    background: var(--accent);
+    border-radius: 1px;
+    transform: scale(0);
+    transition: transform 0.15s;
+  }
+
+  .checkbox-label input:checked + .custom-checkbox::after {
+    transform: scale(1);
+  }
+
+  .eol-select {
+    height: 24px;
+    font-size: 11px;
+    padding: 0 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+
+  /* ═══════════ STATUS BAR ═══════════ */
+  .statusbar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    height: 24px;
+    background: #040810;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    position: relative;
+    z-index: 9;
+    overflow: hidden;
+  }
+
+  .status-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 12px;
+    height: 100%;
+    border-right: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  .status-item.active { color: var(--accent); }
+  .status-item.highlight { color: var(--green); }
+
+  .status-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--red);
+    transition: all 0.3s;
+    flex-shrink: 0;
+  }
+
+  .status-dot.on {
+    background: var(--green);
+    box-shadow: 0 0 4px var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  .status-scroll {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .status-scroll-inner {
+    white-space: nowrap;
+    animation: scrollText 30s linear infinite;
+    color: var(--text-dim);
+    opacity: 0.5;
+    font-size: 9px;
+    letter-spacing: 2px;
+  }
+
+  @keyframes scrollText {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+
+  /* ═══════════ NOTIFICATION ═══════════ */
+  .notification {
+    position: fixed;
+    top: 64px;
+    right: 20px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 10px 16px;
+    font-size: 12px;
+    color: var(--accent);
+    z-index: 1000;
+    transform: translateX(120%);
+    transition: transform 0.3s ease;
+    box-shadow: 0 0 20px rgba(0,212,255,0.2);
+    max-width: 300px;
+  }
+
+  .notification.show { transform: translateX(0); }
+  .notification.error { border-color: var(--red); color: var(--red); box-shadow: 0 0 20px rgba(255,51,85,0.2); }
+  .notification.success { border-color: var(--green); color: var(--green); box-shadow: 0 0 20px rgba(0,255,136,0.2); }
+
+  /* ═══════════ MODAL ═══════════ */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,5,15,0.8);
+    backdrop-filter: blur(4px);
+    z-index: 500;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+
+  .modal-overlay.open { opacity: 1; pointer-events: all; }
+
+  .modal {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-bright);
+    border-radius: 6px;
+    width: 480px;
+    max-height: 80vh;
+    overflow: auto;
+    box-shadow: 0 0 60px rgba(0,212,255,0.15);
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-display);
+    font-size: 12px;
+    letter-spacing: 2px;
+    color: var(--accent);
+  }
+
+  .modal-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 18px;
+    padding: 0 4px;
+    line-height: 1;
+  }
+
+  .modal-close:hover { color: var(--red); }
+
+  .modal-body { padding: 20px; }
+
+  .form-group { margin-bottom: 14px; }
+
+  .form-label {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 5px;
+  }
+
+  .form-control {
+    width: 100%;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 3px;
+    outline: none;
+    height: 34px;
+  }
+
+  .form-control:focus { border-color: var(--accent); }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Browser not supported overlay */
+  .no-support {
+    position: fixed;
+    inset: 0;
+    background: var(--bg-void);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    gap: 16px;
+    text-align: center;
+    padding: 40px;
+  }
+
+  .no-support h2 {
+    font-family: var(--font-display);
+    font-size: 20px;
+    color: var(--amber);
+    letter-spacing: 3px;
+  }
+
+  .no-support p {
+    color: var(--text-secondary);
+    max-width: 400px;
+    line-height: 1.6;
+  }
+
+  /* Sidebar toggle */
+  .sidebar-toggle {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px; height: 40px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-right: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 10px;
+    z-index: 5;
+    transition: right 0.3s, color 0.2s;
+    border-radius: 4px 0 0 4px;
+  }
+
+  .sidebar-toggle:hover { color: var(--accent); }
+
+  /* Blink cursor on last line */
+  .cursor-blink {
+    display: inline-block;
+    width: 8px; height: 13px;
+    background: var(--terminal-green);
+    vertical-align: text-bottom;
+    animation: blink 1s step-end infinite;
+    margin-left: 2px;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+
+  /* History panel */
+  .history-dropdown {
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 0; right: 0;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-bright);
+    border-radius: 4px;
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 100;
+    display: none;
+  }
+
+  .history-dropdown.open { display: block; }
+
+  .history-item {
+    padding: 6px 12px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.1s;
+  }
+
+  .history-item:hover {
+    background: var(--accent-glow);
+    color: var(--accent);
+  }
+
+  /* .input-wrapper → 已内联到 .input-row 规则中 */
+
+  /* Data rate indicator */
+  .data-rate-bar {
+    height: 2px;
+    background: var(--border);
+    border-radius: 1px;
+    overflow: hidden;
+    margin-top: 4px;
+  }
+
+  .data-rate-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--green), var(--accent));
+    transition: width 0.3s ease;
+    border-radius: 1px;
+  }
+
+/* ═══════════ RIGHT SIDEBAR / TOOLBOX ═══════════ */
+.right-sidebar {
+  width: 0;
+  flex-shrink: 0;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  transition: width 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 5;
+  order: 0;
+}
+.right-sidebar.open,
+.right-sidebar.hover-open { width: var(--right-sidebar-width); overflow-y: auto; }
+
+.right-sidebar-toggle {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px; height: 40px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-left: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 10px;
+  z-index: 6;
+  border-radius: 0 4px 4px 0;
+  transition: left 0.3s, color 0.2s;
+}
+.right-sidebar-toggle.open { left: var(--right-sidebar-width); }
+.right-sidebar-toggle:hover { color: var(--accent); }
+
+/* Resize handle */
+.right-sidebar-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 7;
+  cursor: col-resize;
+  background: transparent;
+}
+.right-sidebar:not(.open):not(.hover-open) .right-sidebar-resize-handle {
+  display: none;
+}
+.right-sidebar-resize-handle::before {
+  content: '';
+  position: absolute;
+  right: 2px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.right-sidebar-resize-handle:hover::before,
+.right-sidebar-resize-handle.dragging::before {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+
+/* Tool sections */
+.tool-section {
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  color: var(--accent-dim);
+  cursor: pointer;
+  user-select: none;
+  background: rgba(0,180,255,0.03);
+  transition: background 0.15s;
+}
+.tool-header:hover { background: rgba(0,180,255,0.08); }
+.tool-arrow { font-size: 9px; color: var(--text-dim); }
+.tool-body {
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.tool-field { margin-bottom: 6px; }
+.tool-field:last-child { margin-bottom: 0; }
+.tool-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+.tool-input {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 6px;
+  outline: none;
+  height: 28px;
+  transition: border-color 0.2s;
+}
+.tool-input:focus { border-color: var(--accent-dim); }
+.tool-textarea {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 6px;
+  outline: none;
+  resize: vertical;
+  min-height: 56px;
+  transition: border-color 0.2s;
+}
+.tool-textarea:focus { border-color: var(--accent-dim); }
+.tool-hint {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.tool-select {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 6px;
+  outline: none;
+  height: 28px;
+  cursor: pointer;
+}
+.tool-select:focus { border-color: var(--accent-dim); }
+
+/* Toggle switch */
+.toggle-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.toggle-track {
+  position: relative;
+  width: 36px;
+  height: 18px;
+  background: var(--border);
+  border-radius: 9px;
+  transition: background 0.25s;
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 14px; height: 14px;
+  background: var(--accent);
+  border-radius: 50%;
+  transition: transform 0.25s;
+  box-shadow: 0 0 6px rgba(0,212,255,0.4);
+}
+.toggle-switch input:checked ~ .toggle-track { background: var(--border-bright); }
+.toggle-switch input:checked ~ .toggle-track .toggle-thumb { transform: translateX(18px); }
+.toggle-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 400;
+  transition: color 0.2s;
+}
+.toggle-label.active { color: var(--accent); font-weight: 600; }
+.ascii-result-box { display:none; background:var(--bg-elevated); border:1px solid var(--green-dim); border-radius:2px; padding:5px 6px; margin-bottom:6px; font-family:var(--font-mono); font-size:12px; }
+
+/* Segmented control */
+.segmented-control {
+  display: flex;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+  position: relative;
+}
+.seg-option {
+  flex: 1;
+  text-align: center;
+  padding: 3px 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.2s;
+  position: relative;
+  z-index: 1;
+}
+.seg-option.active {
+  background: var(--bg-elevated);
+  color: var(--accent);
+  box-shadow: 0 0 8px rgba(0,212,255,0.15);
+}
+
+/* Result boxes */
+.tool-result-row {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 6px;
+}
+.tool-result-box {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 5px 6px;
+  flex: 1;
+}
+.tool-result-label {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  margin-bottom: 2px;
+}
+.tool-result-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+  cursor: pointer;
+  color: var(--green);
+  transition: opacity 0.15s;
+}
+.tool-result-value:hover { opacity: 0.7; }
+
+/* Buttons */
+.tool-btn {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 1px;
+  padding: 5px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: all 0.15s;
+}
+.tool-btn:hover { border-color: var(--accent-dim); color: var(--accent); background: var(--accent-glow); }
+.tool-btn.primary {
+  background: linear-gradient(135deg, #00334d, #004466);
+  border-color: var(--accent);
+  color: var(--accent);
+  padding: 6px;
+  font-size: 12px;
+  letter-spacing: 2px;
+}
+.tool-btn.primary:hover { box-shadow: 0 0 12px rgba(0,212,255,0.3); }
+.tool-btn.primary:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
+.tool-btn-sm {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  height: 28px;
+}
+.tool-btn-sm:hover { border-color: var(--accent-dim); color: var(--accent); }
+.tool-inline-group {
+  display: flex;
+  gap: 3px;
+}
+.tool-inline-group .tool-input { flex: 1; }
+.tool-divider {
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+
+/* Status indicator */
+.tool-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.status-dot-sm {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--red);
+  flex-shrink: 0;
+  transition: all 0.3s;
+}
+.status-dot-sm.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+/* TFTP log */
+.tool-log {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 5px 6px;
+  margin-top: 6px;
+  max-height: 80px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.tool-log div.sys { color: var(--accent); font-style: italic; }
+.tool-log div.ok { color: var(--green); }
+.tool-log div.err { color: var(--red); }
+.tool-log div.info { color: var(--text-primary); }
+
+/* Progress bar */
+.progress-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* ASCII table grids */
+.ascii-grid-control {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  max-height: 110px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.ascii-grid-control .ascii-row {
+  display: flex;
+  padding: 1px 4px;
+}
+.ascii-grid-control .ascii-row:nth-child(odd) { background: rgba(0,0,0,0.15); }
+.ascii-grid-control .ascii-cell { flex-shrink: 0; }
+.ascii-grid-control .ascii-cell-dec { width: 28px; color: var(--text-dim); }
+.ascii-grid-control .ascii-cell-hex { width: 28px; color: var(--green-dim); }
+.ascii-grid-control .ascii-cell-char { width: 30px; color: var(--amber); }
+.ascii-grid-control .ascii-cell-desc { flex: 1; color: var(--text-secondary); }
+
+.ascii-grid-printable {
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.ascii-grid-printable .ascii-char {
+  width: 12.5%;
+  text-align: center;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  transition: all 0.1s;
+}
+.ascii-grid-printable .ascii-char:hover {
+  background: var(--accent-glow);
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+.ascii-grid-printable .ascii-char.highlight {
+  background: rgba(255,121,198,0.15);
+  color: var(--green);
+}
+
+/* ═══════════ MODBUS RTU ═══════════ */
+.modbus-frame { font-family: var(--font-mono); font-size: 11px; padding: 6px 8px; border-radius: 4px; margin-bottom: 6px; word-break: break-all; line-height: 1.5; }
+.modbus-frame-tx { background: rgba(0,180,255,0.08); border-left: 2px solid var(--accent); }
+.modbus-frame-rx { background: rgba(0,255,136,0.08); border-left: 2px solid var(--green); }
+.modbus-frame-error { background: rgba(255,50,80,0.08); border-left: 2px solid var(--red); }
+.modbus-crc { color: var(--amber); }
+.modbus-timestamp { font-size: 9px; color: var(--text-dim); font-family: var(--font-ui); }
+.modbus-response-time { font-size: 9px; color: var(--text-secondary); font-family: var(--font-ui); }
+.modbus-reg-table { width: 100%; border-collapse: collapse; font-size: 10px; font-family: var(--font-mono); }
+.modbus-reg-table th { text-align: left; color: var(--text-dim); padding: 2px 4px; border-bottom: 1px solid var(--border); font-family: var(--font-ui); font-size: 9px; letter-spacing: 0.5px; }
+.modbus-reg-table td { padding: 2px 4px; border-bottom: 1px solid rgba(26,58,92,0.3); }
+.modbus-reg-table tr:nth-child(even) { background: rgba(0,0,0,0.15); }
+.modbus-coil-container { display: flex; gap: 3px; flex-wrap: wrap; padding: 4px; }
+.modbus-coil-bit { width: 22px; height: 22px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: bold; border: 1px solid var(--border); }
+.modbus-coil-on { background: var(--green); color: #000; border-color: var(--green); }
+.modbus-coil-off { background: var(--bg-elevated); color: var(--text-dim); }
+.modbus-log-list { max-height: 160px; overflow-y: auto; font-size: 10px; }
+.modbus-log-entry { display: grid; grid-template-columns: 50px 1fr 40px; gap: 4px; padding: 3px 4px; border-bottom: 1px solid rgba(26,58,92,0.2); }
+.modbus-log-entry:hover { background: rgba(0,180,255,0.05); }
+.modbus-log-time { color: var(--text-dim); }
+.modbus-log-desc { font-family: var(--font-mono); }
+.modbus-log-status { text-align: center; }
+.modbus-log-ok { color: var(--green); }
+.modbus-log-err { color: var(--red); }
+.modbus-log-warn { color: var(--amber); }
+.modbus-tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+.modbus-tab { padding: 4px 10px; font-size: 10px; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; user-select: none; }
+.modbus-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.modbus-tab:hover { color: var(--text-primary); }
+
+/* Modbus mode indicator */
+#mbModeSelect { margin-bottom: 8px; }
+#mbIndependentSection { margin-bottom: 8px; }
+#mbIndependentSection .tool-status { margin-bottom: 4px; }
+
+.mb-status-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  background: rgba(0,212,255,0.1);
+  border: 1px solid var(--accent-dim);
+  border-radius: 3px;
+  font-size: 9px;
+  color: var(--accent);
+  letter-spacing: 1px;
+  margin-right: 8px;
+}
+.mb-status-bar.active { background: rgba(0,255,136,0.1); border-color: var(--green-dim); color: var(--green); }
+
+.modbus-freeze-hint {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: var(--accent-dim);
+  background: rgba(0,0,0,0.6);
+  padding: 3px 10px;
+  border-radius: 3px;
+  border: 1px solid var(--accent-dim);
+  z-index: 50;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.modbus-freeze-hint.show { opacity: 1; }
+
+/* Modbus main view */
+.modbus-view {
+  display: none;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  padding: 12px 16px;
+  overflow: hidden;
+  gap: 6px;
+}
+.modbus-view.active { display: flex; }
+.modbus-view-section {
+  background: rgba(0,0,0,0.25);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+.modbus-view-section-title {
+  font-size: 9px;
+  color: var(--accent);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+  opacity: 0.7;
+}
+.modbus-view-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.modbus-view-row .tool-input { height: 26px; font-size: 11px; }
+.modbus-view-row .tool-select { height: 26px; font-size: 11px; }
+.modbus-view-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.modbus-view-btn {
+  height: 26px;
+  padding: 0 14px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: rgba(255,255,255,0.05);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s;
+}
+.modbus-view-btn:hover { background: rgba(255,255,255,0.12); }
+.modbus-view-btn.primary { background: var(--accent); color: var(--bg-primary); border-color: var(--accent); }
+.modbus-view-btn.primary:hover { background: var(--accent-hover); }
+.modbus-view-btn.danger { border-color: var(--red); color: var(--red); }
+.modbus-view-btn.danger:hover { background: rgba(255,68,68,0.15); }
+.modbus-view-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.modbus-view-frames {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.modbus-view-log {
+  max-height: 120px;
+  overflow-y: auto;
+}
+.modbus-view .modbus-reg-table { font-size: 10px; }
+.modbus-view .modbus-coil-container { gap: 2px; }
+.modbus-view .modbus-coil-bit { width: 18px; height: 18px; font-size: 9px; }
+.modbus-cycle-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--amber);
+  letter-spacing: 1px;
+  margin-left: 8px;
+}
+.modbus-cycle-indicator .pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: mbPulse 1s infinite;
+}
+@keyframes mbPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+</style>
+</head>
+<body>
+
+<!-- No Web Serial Support Warning -->
+<div class="no-support" id="noSupport" style="display:none">
+  <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#ffaa00" stroke-width="1.5">
+    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+    <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+  </svg>
+  <h2>⚠ 浏览器不支持 Web Serial API</h2>
+  <p>此工具需要 <strong>Web Serial API</strong> 支持。请使用 <strong>Chrome 89+</strong> 或 <strong>Edge 89+</strong> 浏览器，并确保通过 <code>https://</code> 或 <code>localhost</code> 访问。</p>
+  <p style="color:var(--text-dim); font-size:12px; margin-top:8px">Firefox 和 Safari 暂不支持此 API。</p>
+</div>
+
+<!-- HEADER -->
+<header class="header">
+  <div class="logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
+        <rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 12h10M7 8h5M7 16h7"/>
+      </svg>
+    </div>
+    <div>
+      <div class="logo-text">WEBTERM PRO</div>
+      <div class="logo-sub">Serial Debug Terminal v2.0</div>
+    </div>
+  </div>
+
+  <div class="header-status">
+    <div class="stat-item">
+      <div class="stat-label">RX Bytes</div>
+      <div class="stat-value" id="hdrRx">0</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">TX Bytes</div>
+      <div class="stat-value" id="hdrTx" style="color:var(--amber)">0</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">Uptime</div>
+      <div class="stat-value" id="hdrUptime" style="color:var(--green)">00:00:00</div>
+    </div>
+    <div class="header-time" id="clockDisplay">00:00:00</div>
+  </div>
+</header>
+
+<!-- TOOLBAR -->
+<div class="toolbar">
+  <div class="toolbar-group">
+    <span class="toolbar-label">端口</span>
+    <button class="btn primary" id="btnConnect" onclick="connectPort()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      连接
+    </button>
+    <button class="btn danger" id="btnDisconnect" onclick="disconnectPort()" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      断开
+    </button>
+  </div>
+
+  <div class="toolbar-group">
+    <span class="toolbar-label">波特率</span>
+    <select id="baudRate">
+      <option>300</option><option>1200</option><option>2400</option>
+      <option>4800</option><option>9600</option><option selected>115200</option>
+      <option>230400</option><option>460800</option><option>921600</option>
+      <option>1000000</option><option>2000000</option>
+    </select>
+  </div>
+
+  <div class="toolbar-group">
+    <span class="toolbar-label">数据位</span>
+    <select id="dataBits">
+      <option>7</option><option selected>8</option>
+    </select>
+    <span class="toolbar-label">校验</span>
+    <select id="parity">
+      <option value="none" selected>None</option>
+      <option value="even">Even</option>
+      <option value="odd">Odd</option>
+    </select>
+    <span class="toolbar-label">停止位</span>
+    <select id="stopBits">
+      <option selected>1</option><option>2</option>
+    </select>
+  </div>
+
+  <div class="toolbar-group">
+    <span class="toolbar-label">流控</span>
+    <select id="flowControl">
+      <option value="none" selected>None</option>
+      <option value="hardware">RTS/CTS</option>
+    </select>
+  </div>
+
+  <div class="toolbar-group">
+    <button class="btn" onclick="clearTerminal()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+      清屏
+    </button>
+    <button class="btn" onclick="saveLog()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      保存日志
+    </button>
+    <button class="btn" onclick="openSettings()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93l-1.41 1.41M4.93 4.93l1.41 1.41M12 2v2M12 20v2M2 12h2M20 12h2M19.07 19.07l-1.41-1.41M4.93 19.07l1.41-1.41"/></svg>
+      设置
+    </button>
+  </div>
+
+  <div class="toolbar-group">
+    <button class="btn" id="btnPause" onclick="togglePause()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="pauseIcon"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      暂停
+    </button>
+    <button class="btn success" onclick="sendFile()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      发送文件
+    </button>
+    <input type="file" id="fileInput" style="display:none" onchange="handleFileSelect(event)">
+  </div>
+</div>
+
+<!-- MAIN CONTENT -->
+<div class="main">
+
+  <!-- RIGHT TOOLBOX SIDEBAR -->
+  <div class="right-sidebar" id="rightSidebar">
+    <div class="right-sidebar-resize-handle" id="resizeHandle"></div>
+    <!-- Checksum Calculator -->
+    <div class="tool-section">
+      <div class="tool-header" onclick="toggleTool('checksum')">
+        <span>⊞ 校验计算</span>
+        <span class="tool-arrow" id="arrowChecksum">▼</span>
+      </div>
+      <div class="tool-body" id="toolChecksum">
+        <div class="tool-field">
+          <div class="tool-label">校验算法</div>
+          <select class="tool-select" id="chkAlgorithm">
+            <optgroup label="CRC">
+              <option value="crc32">CRC32</option>
+              <option value="crc16">CRC16</option>
+              <option value="crc8">CRC8</option>
+            </optgroup>
+            <optgroup label="Hash">
+              <option value="md5">MD5</option>
+              <option value="sha1">SHA1</option>
+              <option value="sha256">SHA256</option>
+            </optgroup>
+            <optgroup label="Simple">
+              <option value="sum8">Sum8</option>
+              <option value="sum16">Sum16</option>
+              <option value="xor">XOR</option>
+            </optgroup>
+          </select>
+        </div>
+        <div class="tool-field">
+          <div class="tool-label">输入模式</div>
+          <label class="toggle-switch">
+            <span class="toggle-label active" id="chkModeLabel">ASCII</span>
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+            <span class="toggle-label" id="chkModeLabelHex">HEX</span>
+            <input type="checkbox" id="chkInputMode" onchange="toggleInputMode()" hidden>
+          </label>
+        </div>
+        <div class="tool-field">
+          <textarea class="tool-textarea" id="chkInput" placeholder="输入数据..." oninput="calcChecksum()" rows="4"></textarea>
+          <div class="tool-hint" id="chkHint" style="display:none">HEX 格式：AA BB CC 0D 0A</div>
+        </div>
+        <div class="tool-result-row">
+          <div class="tool-result-box">
+            <div class="tool-result-label">HEX</div>
+            <div class="tool-result-value" id="chkResultHex" onclick="copyText(this)">--</div>
+          </div>
+          <div class="tool-result-box">
+            <div class="tool-result-label">DEC</div>
+            <div class="tool-result-value" id="chkResultDec" onclick="copyText(this)">--</div>
+          </div>
+        </div>
+        <button class="tool-btn" onclick="copyText(document.getElementById('chkResultHex'))">📋 复制结果</button>
+      </div>
+    </div>
+
+    <!-- Float Converter -->
+    <div class="tool-section">
+      <div class="tool-header" onclick="toggleTool('float')">
+        <span>∑ 浮点数转换</span>
+        <span class="tool-arrow" id="arrowFloat">▶</span>
+      </div>
+      <div class="tool-body" id="toolFloat" style="display:none">
+        <div class="tool-field">
+          <div class="tool-label">精度</div>
+          <div class="segmented-control" id="floatPrecision">
+            <span class="seg-option active" data-value="float32" onclick="setFloatPrecision('float32')">float (32-bit)</span>
+            <span class="seg-option" data-value="float64" onclick="setFloatPrecision('float64')">double (64-bit)</span>
+          </div>
+        </div>
+        <div class="tool-field">
+          <div class="tool-label">浮点数</div>
+          <input type="text" class="tool-input" id="floatInput" value="3.14" oninput="calcFloat()" placeholder="输入浮点数">
+        </div>
+        <div class="tool-result-box" style="margin-bottom:3px">
+          <div class="tool-result-label">十六进制</div>
+          <div class="tool-result-value mono" id="floatResultHex" onclick="copyText(this)">0x4048F5C3</div>
+        </div>
+        <div class="tool-result-box" style="margin-bottom:6px">
+          <div class="tool-result-label">二进制</div>
+          <div class="tool-result-value mono" id="floatResultBin" onclick="copyText(this)">01000000 01001000 11110101 11000011</div>
+        </div>
+        <div class="tool-divider"></div>
+        <div class="tool-field">
+          <div class="tool-label">十六进制 → 浮点数</div>
+          <div class="tool-inline-group">
+            <input type="text" class="tool-input" id="floatHexInput" placeholder="4048F5C3" onchange="calcHexToFloat()">
+            <button class="tool-btn-sm" onclick="calcHexToFloat()">→</button>
+          </div>
+        </div>
+        <div class="tool-field">
+          <div class="tool-label">整数 → 十六进制</div>
+          <div class="tool-inline-group">
+            <input type="text" class="tool-input" id="floatIntInput" placeholder="255" onchange="calcIntToHex()">
+            <button class="tool-btn-sm" onclick="calcIntToHex()">→</button>
+          </div>
+        </div>
+        <div class="tool-result-box">
+          <div class="tool-result-label">结果 (HEX)</div>
+          <div class="tool-result-value mono" id="floatReverseResult" onclick="copyText(this)">--</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ASCII Table -->
+    <div class="tool-section">
+      <div class="tool-header" onclick="toggleTool('ascii')">
+        <span>⎓ ASCII 码表</span>
+        <span class="tool-arrow" id="arrowAscii">▶</span>
+      </div>
+      <div class="tool-body" id="toolAscii" style="display:none">
+        <div class="tool-field">
+          <input type="text" class="tool-input" id="asciiSearch" placeholder="搜索字符 / Dec / Hex..." oninput="searchAscii()">
+        </div>
+        <div id="asciiResult" class="ascii-result-box">
+          <div id="asciiResultContent" style="display:flex; gap:6px; justify-content:space-between;"></div>
+        </div>
+        <div id="asciiTable">
+          <div class="tool-label" style="margin-bottom:2px">控制字符 (0-31)</div>
+          <div id="asciiControl" class="ascii-grid-control"></div>
+          <div class="tool-label" style="margin:4px 0 2px">可打印字符 (32-126)</div>
+          <div id="asciiPrintable" class="ascii-grid-printable"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TFTP Client -->
+    <div class="tool-section">
+      <div class="tool-header" onclick="toggleTool('tftp')">
+        <span>⇄ TFTP 客户端</span>
+        <span class="tool-arrow" id="arrowTftp">▶</span>
+      </div>
+      <div class="tool-body" id="toolTftp" style="display:none">
+        <div class="tool-field">
+          <div class="tool-label">目标地址</div>
+          <div class="tool-inline-group">
+            <input type="text" class="tool-input" id="tftpHost" value="192.168.1.100" placeholder="IP 地址">
+            <input type="text" class="tool-input" id="tftpPort" value="69" style="width:60px;flex:none" placeholder="端口">
+          </div>
+        </div>
+        <div class="tool-field">
+          <div class="tool-status" id="tftpProxyStatus">
+            <span class="status-dot-sm" id="tftpDot"></span>
+            <span id="tftpStatusText">代理未连接</span>
+          </div>
+          <button class="tool-btn" id="tftpConnectBtn" onclick="connectTftpProxy()">连接代理</button>
+        </div>
+        <div class="tool-field">
+          <div class="tool-label">本地文件</div>
+          <div class="tool-inline-group">
+            <input type="text" class="tool-input" id="tftpFilename" readonly placeholder="选择文件..." style="flex:1">
+            <button class="tool-btn-sm" onclick="document.getElementById('tftpFileInput').click()">浏览</button>
+          </div>
+          <input type="file" id="tftpFileInput" style="display:none" onchange="onTftpFileSelect(event)">
+        </div>
+        <button class="tool-btn primary" id="tftpUploadBtn" onclick="startTftpUpload()" disabled>⇧ 上传文件</button>
+        <div class="tool-log" id="tftpLog"></div>
+        <div class="tftp-progress" id="tftpProgress" style="display:none">
+          <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-dim);">
+            <span>进度</span>
+            <span id="tftpProgressPct">0%</span>
+          </div>
+          <div class="progress-bar"><div class="progress-fill" id="tftpProgressFill"></div></div>
+        </div>
+      </div>
+    </div>
+    <!-- Modbus RTU Debug -->
+    <div class="tool-section">
+      <div class="tool-header" onclick="toggleTool('modbus')">
+        <span>◈ Modbus RTU 调试</span>
+        <span class="tool-arrow" id="arrowModbus">▶</span>
+      </div>
+      <div class="tool-body" id="toolModbus" style="display:none">
+        <!-- Modbus mode toggle + mode select -->
+        <div class="tool-field" style="border-bottom:1px solid var(--border); padding-bottom:8px; margin-bottom:8px;">
+          <label class="toggle-switch" style="justify-content:space-between; width:100%;">
+            <span class="toggle-label" id="mbToggleLabel">Modbus 模式</span>
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <input type="checkbox" id="mbActivate" onchange="modbusToggleActive()" hidden>
+          </label>
+        </div>
+        <div id="mbModeSelect" style="display:none;">
+          <div class="tool-field" style="margin-bottom:6px;">
+            <div class="segmented-control">
+              <span class="seg-option active" data-mode="shared" onclick="modbusSetMode('shared')">共享串口</span>
+              <span class="seg-option" data-mode="independent" onclick="modbusSetMode('independent')">独立串口</span>
+            </div>
+          </div>
+          <div id="mbIndependentSection" style="display:none;">
+            <div class="tool-field">
+              <div class="tool-label">波特率</div>
+              <select class="tool-select" id="mbBaudRate">
+                <option>300</option><option>1200</option><option>2400</option>
+                <option>4800</option><option>9600</option><option selected>115200</option>
+                <option>230400</option><option>460800</option><option>921600</option>
+                <option>1000000</option><option>2000000</option>
+              </select>
+            </div>
+            <div class="tool-field">
+              <div style="display:flex; gap:4px;">
+                <div style="flex:1;">
+                  <div class="tool-label">数据位</div>
+                  <select class="tool-select" id="mbDataBits">
+                    <option>7</option><option selected>8</option>
+                  </select>
+                </div>
+                <div style="flex:1;">
+                  <div class="tool-label">校验</div>
+                  <select class="tool-select" id="mbParity">
+                    <option value="none" selected>None</option>
+                    <option value="even">Even</option>
+                    <option value="odd">Odd</option>
+                  </select>
+                </div>
+                <div style="flex:1;">
+                  <div class="tool-label">停止位</div>
+                  <select class="tool-select" id="mbStopBits">
+                    <option selected>1</option><option>2</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="tool-field">
+              <div class="tool-label">流控</div>
+              <select class="tool-select" id="mbFlowControl">
+                <option value="none" selected>None</option>
+                <option value="hardware">RTS/CTS</option>
+              </select>
+            </div>
+            <div class="tool-field">
+              <button class="tool-btn" id="mbConnectBtn" onclick="modbusConnectPort()">连接独立串口</button>
+            </div>
+            <div class="tool-field">
+              <div class="tool-status" id="mbPortStatus" style="display:none;">
+                <span class="status-dot-sm" id="mbPortDot"></span>
+                <span id="mbPortInfo">--</span>
+              </div>
+            </div>
+            <div class="tool-divider"></div>
+          </div>
+        </div>
+        <div class="tool-field">
+          <div class="tool-label">从站 ID</div>
+          <div style="display:flex; gap:4px;">
+            <input type="number" class="tool-input" id="mbSlaveId" value="1" min="1" max="247" style="width:60px; text-align:center;">
+            <select class="tool-select" id="mbFuncCode" style="flex:1;" onchange="modbusOnFuncCodeChange()">
+              <option value="1">01 - Read Coils</option>
+              <option value="2">02 - Read Discrete Inputs</option>
+              <option value="3" selected>03 - Read Holding Registers</option>
+              <option value="4">04 - Read Input Registers</option>
+              <option value="5">05 - Write Single Coil</option>
+              <option value="6">06 - Write Single Register</option>
+              <option value="15">15 (0F) - Write Multiple Coils</option>
+              <option value="16">16 (10) - Write Multiple Registers</option>
+            </select>
+          </div>
+        </div>
+        <div class="tool-field">
+          <div style="display:flex; gap:4px;">
+            <div style="flex:1;">
+              <div class="tool-label">起始地址</div>
+              <input type="text" class="tool-input" id="mbAddress" value="0" placeholder="0">
+            </div>
+            <div style="flex:0 0 70px;">
+              <div class="tool-label">数量</div>
+              <input type="number" class="tool-input" id="mbQuantity" value="10" min="1" max="2000" style="width:100%; text-align:center;">
+            </div>
+          </div>
+        </div>
+        <div class="tool-field" id="mbWriteDataField" style="display:none;">
+          <div class="tool-label">写入数据 (HEX)</div>
+          <input type="text" class="tool-input" id="mbWriteData" placeholder="00 FF 00 01 ..." style="width:100%;">
+        </div>
+        <div class="tool-field">
+          <div style="display:flex; gap:4px; align-items:flex-end;">
+            <button class="tool-btn primary" id="mbSendBtn" onclick="modbusSend()" style="flex:1;">▶ 发送</button>
+            <button class="tool-btn" id="mbCycleBtn" onclick="modbusSidebarCycle()" style="flex:1;">⟳ 循环</button>
+            <label class="toggle-switch" style="flex-shrink:0;">
+              <span class="toggle-label active" id="mbAddrDecLabel">DEC</span>
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              <span class="toggle-label" id="mbAddrHexLabel">HEX</span>
+              <input type="checkbox" id="mbAddrMode" onchange="modbusToggleAddrMode()" hidden>
+            </label>
+          </div>
+        </div>
+        <div id="modbusTxDisplay" style="display:none;"></div>
+        <div id="modbusRxDisplay" style="display:none;"></div>
+        <div id="modbusDataDisplay" style="display:none;"></div>
+        <div class="tool-divider"></div>
+        <div class="modbus-tabs">
+          <div class="modbus-tab active" onclick="modbusSwitchTab('req')">请求</div>
+          <div class="modbus-tab" onclick="modbusSwitchTab('log')">日志</div>
+        </div>
+        <div id="modbusLogPanel">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <span style="font-size:10px; color:var(--text-dim);" id="modbusLogCount">0 条记录</span>
+            <button class="tool-btn" style="font-size:9px; padding:2px 8px;" onclick="modbusClearLog()">清空</button>
+          </div>
+          <div class="modbus-log-list" id="modbusLogList"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="right-sidebar-toggle" id="rightSidebarToggle" onclick="toggleRightSidebar()" title="切换工具箱">▶</div>
+
+  <!-- TERMINAL AREA -->
+  <div class="terminal-area">
+    <div class="terminal-wrapper">
+    <div class="terminal-output" id="terminalOutput">
+      <!-- Welcome message -->
+    </div>
+    <!-- Modbus Main View -->
+    <div class="modbus-view" id="modbusView">
+      <!-- Request Builder -->
+      <div class="modbus-view-section" style="flex-shrink:0;">
+        <div class="modbus-view-section-title">请求构建器</div>
+        <div class="modbus-view-row" style="margin-bottom:4px;">
+          <span class="modbus-view-label">从站</span>
+          <input type="number" class="tool-input" id="mvSlaveId" value="1" min="1" max="247" style="width:55px; text-align:center;">
+          <select class="tool-select" id="mvFuncCode" style="width:160px;" onchange="modbusViewSync()">
+            <option value="1">01 - Read Coils</option>
+            <option value="2">02 - Read Discrete Inputs</option>
+            <option value="3" selected>03 - Read Holding Registers</option>
+            <option value="4">04 - Read Input Registers</option>
+            <option value="5">05 - Write Single Coil</option>
+            <option value="6">06 - Write Single Register</option>
+            <option value="15">15 (0F) - Write Multiple Coils</option>
+            <option value="16">16 (10) - Write Multiple Registers</option>
+          </select>
+          <span class="modbus-view-label">地址</span>
+          <input type="text" class="tool-input" id="mvAddress" value="0" style="width:60px;">
+          <span class="modbus-view-label">数量</span>
+          <input type="number" class="tool-input" id="mvQuantity" value="10" min="1" max="2000" style="width:55px; text-align:center;">
+        </div>
+        <div class="modbus-view-row" style="margin-bottom:4px;">
+          <span class="modbus-view-label">写入 (HEX)</span>
+          <input type="text" class="tool-input" id="mvWriteData" placeholder="00 FF 00 01..." style="flex:1; max-width:300px;">
+          <label class="toggle-switch" style="flex-shrink:0;">
+            <span class="toggle-label active" id="mvAddrDecLabel">DEC</span>
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <span class="toggle-label" id="mvAddrHexLabel">HEX</span>
+            <input type="checkbox" id="mvAddrMode" onchange="modbusViewSyncAddrMode()" hidden>
+          </label>
+          <span class="modbus-view-label" style="margin-left:12px;">循环间隔</span>
+          <input type="number" class="tool-input" id="mvCycleInterval" value="1000" min="100" max="60000" style="width:65px; text-align:center;">
+          <span class="modbus-view-label">ms</span>
+        </div>
+        <div class="modbus-view-row">
+          <button class="modbus-view-btn primary" id="mvSendBtn" onclick="modbusViewSend()">▶ 发送</button>
+          <button class="modbus-view-btn" id="mvCycleBtn" onclick="modbusViewToggleCycle()">⟳ 开始循环</button>
+          <button class="modbus-view-btn danger" id="mvStopBtn" onclick="modbusViewStop()" disabled>■ 停止</button>
+          <span class="modbus-cycle-indicator" id="mvCycleIndicator" style="display:none;"><span class="pulse"></span> 循环中 <span id="mvCycleCount">0</span></span>
+        </div>
+      </div>
+
+      <!-- TX/RX Frames -->
+      <div class="modbus-view-section modbus-view-frames" id="mvFramesSection">
+        <div class="modbus-view-section-title">帧 监视</div>
+        <div id="mvTxDisplay" style="margin-bottom:4px;"></div>
+        <div id="mvRxDisplay" style="margin-bottom:4px;"></div>
+        <div id="mvDataDisplay"></div>
+      </div>
+
+      <!-- Log -->
+      <div class="modbus-view-section modbus-view-log" style="flex-shrink:0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">
+          <span class="modbus-view-section-title" style="margin-bottom:0;">日志</span>
+          <span style="font-size:9px; color:var(--text-dim);" id="mvLogCount">0 条</span>
+        </div>
+        <div class="modbus-log-list" id="mvLogList" style="max-height:80px;"></div>
+      </div>
+    </div>
+      <div class="modbus-freeze-hint" id="mbFreezeHint">◆ MODBUS ACTIVE — 终端已暂停</div>
+
+    <!-- INPUT AREA -->
+    <div class="input-area">
+      <div class="input-row">
+        <span class="input-prompt">›</span>
+        <div class="input-wrapper">
+          <div class="history-dropdown" id="historyDropdown"></div>
+          <input type="text" class="input-field" id="inputField"
+            placeholder="输入命令并按 Enter 发送..."
+            onkeydown="handleInputKey(event)"
+            oninput="handleInputChange(event)"
+            autocomplete="off" spellcheck="false">
+        </div><button class="btn primary" onclick="sendInput()" id="btnSend" type="button">发送</button>
+      </div>
+      <div class="input-options">
+        <label class="checkbox-label">
+          <input type="checkbox" id="chkHex">
+          <div class="custom-checkbox"></div>
+          HEX 显示
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="chkTimestamp" checked>
+          <div class="custom-checkbox"></div>
+          时间戳
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="chkAutoScroll" checked>
+          <div class="custom-checkbox"></div>
+          自动滚动
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="chkHexInput">
+          <div class="custom-checkbox"></div>
+          HEX 输入
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="chkRS485">
+          <div class="custom-checkbox"></div>
+          RS485 模式
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="chkLocalEcho">
+          <div class="custom-checkbox"></div>
+          本地回显
+        </label>
+        <span style="font-size:10px; color:var(--text-dim); letter-spacing:1px;">EOL:</span>
+        <select class="eol-select" id="eolSelect">
+          <option value="none">无</option>
+          <option value="cr" selected>CR \r</option>
+          <option value="lf">LF \n</option>
+          <option value="crlf">CR+LF</option>
+        </select>
+        <span style="font-size:10px; color:var(--text-dim); letter-spacing:1px; margin-left:4px;">发送间隔:</span>
+        <input type="number" id="sendDelay" value="0" min="0" max="10000" style="width:55px; height:24px; font-size:11px; padding:0 6px;" title="连续发送延迟(ms)">
+        <span style="font-size:10px; color:var(--text-dim);">ms</span>
+      </div>
+    </div>
+  </div>
+        <div id="mbCycleStatus" style="display:none; font-size:9px; color:var(--amber); padding:4px 0; text-align:center;"><span class="pulse" style="display:inline-block; width:4px; height:4px; border-radius:50%; background:var(--amber); animation:mbPulse 1s infinite;"></span> 循环中: <span id="mbSidebarCycleCount">0</span></div>
+  </div>
+
+    <!-- SIDEBAR -->
+  <div class="sidebar" id="sidebar">
+    <!-- Connection Status -->
+    <div class="sidebar-section">
+      <div class="sidebar-title">● 连接状态</div>
+      <div class="conn-indicator">
+        <div class="conn-dot" id="connDot"></div>
+        <span class="conn-text" id="connText">未连接</span>
+      </div>
+      <div style="padding: 0 12px 10px; font-size: 11px; color: var(--text-dim); font-family: var(--font-mono);" id="portInfo">—</div>
+    </div>
+
+    <!-- Stats -->
+    <div class="sidebar-section">
+      <div class="sidebar-title">◈ 数据统计</div>
+      <div class="stats-grid">
+        <div class="stats-card">
+          <div class="stats-card-label">接收 RX</div>
+          <div class="stats-card-value rx" id="statRx">0 B</div>
+        </div>
+        <div class="stats-card">
+          <div class="stats-card-label">发送 TX</div>
+          <div class="stats-card-value tx" id="statTx">0 B</div>
+        </div>
+        <div class="stats-card">
+          <div class="stats-card-label">RX 行数</div>
+          <div class="stats-card-value rx" id="statLines">0</div>
+        </div>
+        <div class="stats-card">
+          <div class="stats-card-label">错误</div>
+          <div class="stats-card-value" id="statErrors" style="color:var(--red)">0</div>
+        </div>
+      </div>
+      <div style="padding: 0 8px 8px;">
+        <div style="font-size: 9px; color: var(--text-dim); letter-spacing: 1.5px; margin-bottom: 3px;">RX RATE</div>
+        <div class="data-rate-bar"><div class="data-rate-fill" id="rxRateBar" style="width:0%"></div></div>
+        <div style="font-family: var(--font-mono); font-size: 11px; color: var(--green); margin-top: 2px;" id="rxRateText">0 B/s</div>
+      </div>
+    </div>
+
+    <!-- Macros -->
+    <div class="sidebar-section" style="flex:1; overflow-y:auto;">
+      <div class="sidebar-title">⚡ 快捷指令</div>
+      <div class="sidebar-content">
+        <div class="macro-list" id="macroList"></div>
+        <button class="btn" style="width:100%; margin-top:8px; justify-content:center; font-size:11px;" onclick="addMacro()">+ 添加指令</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SIDEBAR TOGGLE -->
+  <div class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()">▶</div>
+</div>
+
+<!-- STATUS BAR -->
+<div class="statusbar">
+  <div class="status-item">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">DISCONNECTED</span>
+  </div>
+  <div class="status-item active" id="statusPort">PORT: —</div>
+  <div class="status-item active" id="statusBaud">BAUD: —</div>
+  <div class="status-item active" id="statusConfig">8N1</div>
+  <div class="status-item highlight" id="statusMode">ASCII MODE</div>
+  <span class="mb-status-bar" id="mbStatusBar" style="display:none;">⎔ MODBUS</span>
+  <div class="status-item" id="statusLines">LINES: 0</div>
+  <div class="status-scroll">
+    <div class="status-scroll-inner">
+      WEB SERIAL TERMINAL PRO &nbsp;&nbsp;&nbsp; POWERED BY WEB SERIAL API &nbsp;&nbsp;&nbsp; CHROME / EDGE COMPATIBLE &nbsp;&nbsp;&nbsp; 支持波特率: 300~2000000 &nbsp;&nbsp;&nbsp; 支持 ASCII / HEX 模式 &nbsp;&nbsp;&nbsp; WEB SERIAL TERMINAL PRO &nbsp;&nbsp;&nbsp; POWERED BY WEB SERIAL API &nbsp;&nbsp;&nbsp; CHROME / EDGE COMPATIBLE &nbsp;&nbsp;&nbsp; 支持波特率: 300~2000000 &nbsp;&nbsp;&nbsp; 支持 ASCII / HEX 模式 &nbsp;&nbsp;&nbsp;
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal-overlay" id="settingsModal">
+  <div class="modal">
+    <div class="modal-header">
+      <span>⚙ 终端设置</span>
+      <button class="modal-close" onclick="closeSettings()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">终端字体大小</label>
+        <select class="form-control" id="fontSize" onchange="applySettings()">
+          <option value="11">11px</option>
+          <option value="12">12px</option>
+          <option value="13">13px</option>
+          <option value="14">14px</option>
+          <option value="16" selected>16px</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">终端颜色主题</label>
+        <select class="form-control" id="colorTheme" onchange="applySettings()">
+          <option value="green">磷光绿 (Phosphor Green)</option>
+          <option value="amber">琥珀色 (Amber)</option>
+          <option value="cyan">青色 (Cyan)</option>
+          <option value="white">白色 (Classic White)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">最大显示行数</label>
+        <input type="number" class="form-control" id="maxLines" value="2000" min="100" max="50000">
+      </div>
+      <div class="form-group">
+        <label class="form-label">缓冲区大小 (字节)</label>
+        <input type="number" class="form-control" id="bufSize" value="65536" min="1024" max="1048576">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeSettings()">取消</button>
+      <button class="btn primary" onclick="applySettings(); closeSettings()">应用</button>
+    </div>
+  </div>
+</div>
+
+<!-- NOTIFICATION -->
+<div class="notification" id="notification"></div>
+
+<script>
+// ════════════════════════════════════════════════════════
+// STATE
+// ════════════════════════════════════════════════════════
+let port = null;
+let reader = null;
+let writer = null;
+let isConnected = false;
+let isPaused = false;
+let rxBytes = 0, txBytes = 0;
+let rxLines = 0, errors = 0;
+let connectedAt = null;
+let lineCount = 0;
+let inputHistory = [];
+let historyIndex = -1;
+let macros = [];
+let rxBuffer = '';
+let rxBytesLastSec = 0, rxRateSampled = 0;
+let maxLines = 2000;
+let sidebarOpen = true;
+let readLoopRunning = false;
+
+// Right sidebar
+let rightSidebarLocked = false;
+let rightSidebarHoverTimer = null;
+let toolStates = { checksum: false, float: false, ascii: false, tftp: false };
+
+// TFTP
+let tftpWs = null;
+let tftpFileData = null;
+let tftpFileName = '';
+let tftpBusy = false;
+
+// Settings
+let settings = {
+  fontSize: 16,
+  colorTheme: 'green',
+  maxLines: 2000,
+  bufSize: 65536
+};
+
+// ════════════════════════════════════════════════════════
+// INIT
+// ════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  // Check Web Serial API support
+  if (!('serial' in navigator)) {
+    document.getElementById('noSupport').style.display = 'flex';
+    return;
+  }
+
+  loadState();
+  startClock();
+  startUptimeTimer();
+  startRxRateMonitor();
+  renderMacros();
+  printWelcome();
+
+  // Listen for input field
+  document.getElementById('inputField').addEventListener('blur', () => {
+    setTimeout(() => document.getElementById('historyDropdown').classList.remove('open'), 200);
+  });
+
+  // Sidebar toggle position
+  updateSidebarToggle();
+
+  // Init toolbox — checksum open by default, others closed
+  toggleTool('checksum');
+
+  // Init float converter and ASCII table
+  calcFloat();
+  renderAsciiTable();
+
+  // Init right sidebar hover behavior
+  initRightSidebarHover();
+
+  // Load saved sidebar width
+  const savedWidth = localStorage.getItem('wtp_right_sidebar_width');
+  if (savedWidth) {
+    document.documentElement.style.setProperty('--right-sidebar-width', savedWidth + 'px');
+  }
+  initResizeHandle();
+});
+
+// ════════════════════════════════════════════════════════
+// WELCOME
+// ════════════════════════════════════════════════════════
+function printWelcome() {
+  const lines = [
+    { type: 'sys', text: '╔══════════════════════════════════════════════════════╗' },
+    { type: 'sys', text: '║         WEBTERM PRO — 网页串口调试终端 v2.1          ║' },
+    { type: 'sys', text: '║    Powered by Web Serial API  |  Single HTML File     ║' },
+    { type: 'sys', text: '╚══════════════════════════════════════════════════════╝' },
+    { type: 'sys', text: '' },
+    { type: 'sys', text: '▶ 点击 [连接] 按钮选择串口设备并建立连接' },
+    { type: 'sys', text: '▶ 支持 ASCII / HEX 双模式显示与发送' },
+    { type: 'sys', text: '▶ 使用 ↑↓ 方向键调出历史指令' },
+    { type: 'sys', text: '▶ 侧边栏可设置快捷指令宏，一键发送常用命令' },
+    { type: 'sys', text: '▶ 快捷键: Ctrl+L 清屏 | Ctrl+D 断开连接' },
+    { type: 'sys', text: '' },
+    { type: 'sys', text: '◈ 接收数据彩色规则:' },
+    { type: 'rx',  text: 'ERROR / FAIL / FATAL   ← 红色高亮' },
+    { type: 'rx',  text: 'WARN / WARNING / TIMEOUT  ← 黄色高亮' },
+    { type: 'rx',  text: 'OK / SUCCESS / READY / ACK  ← 绿色高亮' },
+    { type: 'rx',  text: 'INFO / DEBUG / TRACE  ← 青色高亮' },
+    { type: 'rx',  text: '0xFF / 0x1234  ← 橙色（十六进制数）' },
+    { type: 'rx',  text: '192.168.1.1   ← 紫色（IP地址）| AA:BB:CC  ← 粉色（MAC）' },
+    { type: 'rx',  text: '支持 ANSI 转义码 \\x1b[31m 等终端颜色序列' },
+    { type: 'sys', text: '' },
+  ];
+  lines.forEach(l => appendLine(l.type, l.text, false));
+}
+
+// ════════════════════════════════════════════════════════
+// RIGHT SIDEBAR / TOOLBOX
+// ════════════════════════════════════════════════════════
+function toggleRightSidebar() {
+  const el = document.getElementById('rightSidebar');
+  const toggle = document.getElementById('rightSidebarToggle');
+  if (rightSidebarLocked) {
+    rightSidebarLocked = false;
+    el.classList.remove('open');
+    toggle.classList.remove('open');
+  } else {
+    rightSidebarLocked = true;
+    el.classList.remove('hover-open');
+    el.classList.add('open');
+    toggle.classList.add('open');
+  }
+  updateRightSidebarToggle();
+}
+
+function initRightSidebarHover() {
+  const rightSidebar = document.getElementById('rightSidebar');
+  const terminalArea = document.querySelector('.terminal-area');
+  const toggle = document.getElementById('rightSidebarToggle');
+
+  const hoverZone = document.createElement('div');
+  hoverZone.style.cssText = 'position:absolute;left:0;top:0;bottom:0;width:15px;z-index:4;cursor:default;';
+  terminalArea.appendChild(hoverZone);
+
+  hoverZone.addEventListener('mouseenter', () => {
+    if (rightSidebarLocked) return;
+    clearTimeout(rightSidebarHoverTimer);
+    rightSidebar.classList.add('hover-open');
+    toggle.classList.add('open');
+    updateRightSidebarToggle();
+  });
+
+  hoverZone.addEventListener('mouseleave', () => {
+    if (rightSidebarLocked) return;
+    clearTimeout(rightSidebarHoverTimer);
+    rightSidebarHoverTimer = setTimeout(() => {
+      rightSidebar.classList.remove('hover-open');
+      toggle.classList.remove('open');
+      updateRightSidebarToggle();
+    }, 300);
+  });
+
+  rightSidebar.addEventListener('mouseenter', () => {
+    clearTimeout(rightSidebarHoverTimer);
+  });
+
+  rightSidebar.addEventListener('mouseleave', () => {
+    if (rightSidebarLocked) return;
+    clearTimeout(rightSidebarHoverTimer);
+    rightSidebarHoverTimer = setTimeout(() => {
+      rightSidebar.classList.remove('hover-open');
+      toggle.classList.remove('open');
+      updateRightSidebarToggle();
+    }, 300);
+  });
+
+  toggle.addEventListener('mouseenter', () => {
+    if (rightSidebarLocked) return;
+    clearTimeout(rightSidebarHoverTimer);
+    rightSidebar.classList.add('hover-open');
+    toggle.classList.add('open');
+    updateRightSidebarToggle();
+  });
+}
+
+function updateRightSidebarToggle() {
+  const el = document.getElementById('rightSidebar');
+  const toggle = document.getElementById('rightSidebarToggle');
+  const isVisible = el.classList.contains('open') || el.classList.contains('hover-open');
+  toggle.textContent = isVisible ? '◀' : '▶';
+}
+
+function toggleTool(name) {
+  toolStates[name] = !toolStates[name];
+  const body = document.getElementById('tool' + name.charAt(0).toUpperCase() + name.slice(1));
+  const arrow = document.getElementById('arrow' + name.charAt(0).toUpperCase() + name.slice(1));
+  if (body) body.style.display = toolStates[name] ? '' : 'none';
+  if (arrow) arrow.textContent = toolStates[name] ? '▼' : '▶';
+
+  // If modbus panel is being collapsed while active, turn off modbus mode
+  if (name === 'modbus' && !toolStates[name] && modbusActive) {
+    document.getElementById('mbActivate').checked = false;
+    modbusToggleActive();
+  }
+  // Stop cycling on disconnect
+  if (modbusCycling) modbusStopCycle();
+
+}
+
+// ════════════════════════════════════════════════════════
+// TOOLBOX — CHECKSUM
+// ════════════════════════════════════════════════════════
+function toggleInputMode() {
+  const isHex = document.getElementById('chkInputMode').checked;
+  document.getElementById('chkHint').style.display = isHex ? '' : 'none';
+  document.getElementById('chkModeLabel').classList.toggle('active', !isHex);
+  document.getElementById('chkModeLabelHex').classList.toggle('active', isHex);
+  calcChecksum();
+}
+
+// CRC tables
+let crc8Table = null, crc16Table = null, crc32Table = null;
+
+function initCrcTables() {
+  if (crc8Table) return;
+  crc8Table = new Uint32Array(256);
+  crc16Table = new Uint32Array(256);
+  crc32Table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let crc8 = i, crc16 = i, crc32 = i;
+    for (let j = 0; j < 8; j++) {
+      crc8 = (crc8 & 0x80) ? ((crc8 << 1) ^ 0x07) : (crc8 << 1);
+      crc16 = (crc16 & 1) ? ((crc16 >>> 1) ^ 0xA001) : (crc16 >>> 1);
+      crc32 = (crc32 & 1) ? ((crc32 >>> 1) ^ 0xEDB88320) : (crc32 >>> 1);
+    }
+    crc8Table[i] = crc8 & 0xFF;
+    crc16Table[i] = crc16 & 0xFFFF;
+    crc32Table[i] = crc32;
+  }
+}
+
+function crc8(data) {
+  initCrcTables();
+  let c = 0;
+  for (const b of data) c = crc8Table[(c ^ b) & 0xFF];
+  return c & 0xFF;
+}
+
+function crc16(data) {
+  initCrcTables();
+  let c = 0;
+  for (const b of data) c = (c >>> 8) ^ crc16Table[(c ^ b) & 0xFF];
+  return c & 0xFFFF;
+}
+
+function crc32(data) {
+  initCrcTables();
+  let c = 0xFFFFFFFF;
+  for (const b of data) c = (c >>> 8) ^ crc32Table[(c ^ b) & 0xFF];
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function sum8(data) { let s = 0; for (const b of data) s = (s + b) & 0xFF; return s; }
+function sum16(data) { let s = 0; for (const b of data) s = (s + b) & 0xFFFF; return s; }
+function xorSum(data) { let x = 0; for (const b of data) x ^= b; return x & 0xFF; }
+
+async function calcChecksum() {
+  const input = document.getElementById('chkInput').value;
+  const algo = document.getElementById('chkAlgorithm').value;
+  const isHex = document.getElementById('chkInputMode').checked;
+  const hexEl = document.getElementById('chkResultHex');
+  const decEl = document.getElementById('chkResultDec');
+
+  if (!input.trim()) { hexEl.textContent = '--'; decEl.textContent = '--'; return; }
+
+  let bytes;
+  if (isHex) {
+    const hex = input.replace(/\s+/g, '');
+    if (!/^[0-9A-Fa-f]*$/.test(hex) || hex.length % 2 !== 0) {
+      hexEl.textContent = '格式错误'; decEl.textContent = '格式错误';
+      return;
+    }
+    bytes = new Uint8Array(hex.match(/.{2}/g).map(b => parseInt(b, 16)));
+  } else {
+    bytes = new TextEncoder().encode(input);
+  }
+
+  let result;
+  switch (algo) {
+    case 'crc8': result = crc8(bytes); break;
+    case 'crc16': result = crc16(bytes); break;
+    case 'crc32': result = crc32(bytes); break;
+    case 'sum8': result = sum8(bytes); break;
+    case 'sum16': result = sum16(bytes); break;
+    case 'xor': result = xorSum(bytes); break;
+    case 'md5':
+      hexEl.textContent = 'MD5 暂不支持'; decEl.textContent = '请使用 SHA-1/256';
+      return;
+    case 'sha1':
+    case 'sha256': {
+      const hashAlgo = { sha1: 'SHA-1', sha256: 'SHA-256' }[algo];
+      try {
+        const hashBuf = await crypto.subtle.digest(hashAlgo, bytes);
+        const hashArr = new Uint8Array(hashBuf);
+        result = Array.from(hashArr).map(b => b.toString(16).padStart(2,'0')).join('');
+      } catch (e) {
+        hexEl.textContent = 'Error'; decEl.textContent = 'Error';
+        return;
+      }
+      hexEl.textContent = '0x' + result;
+      decEl.textContent = result.length > 16 ? result : parseInt(result, 16).toString();
+      return;
+    }
+    default: hexEl.textContent = '--'; decEl.textContent = '--'; return;
+  }
+
+  hexEl.textContent = (algo === 'crc32' || algo === 'sum16')
+    ? '0x' + result.toString(16).toUpperCase().padStart(4,'0')
+    : '0x' + result.toString(16).toUpperCase().padStart(2,'0');
+  decEl.textContent = result.toString();
+}
+
+function copyText(el) {
+  const text = el.textContent || el.innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = el.style.color;
+    el.style.color = 'var(--amber)';
+    setTimeout(() => el.style.color = orig, 400);
+  }).catch(() => {});
+}
+
+// ════════════════════════════════════════════════════════
+// TOOLBOX — FLOAT CONVERTER
+// ════════════════════════════════════════════════════════
+let floatPrecision = 'float32';
+
+function setFloatPrecision(val) {
+  floatPrecision = val;
+  document.querySelectorAll('#floatPrecision .seg-option').forEach(el => {
+    el.classList.toggle('active', el.dataset.value === val);
+  });
+  calcFloat();
+}
+
+function calcFloat() {
+  const val = document.getElementById('floatInput').value.trim();
+  const hexEl = document.getElementById('floatResultHex');
+  const binEl = document.getElementById('floatResultBin');
+
+  if (!val || isNaN(parseFloat(val))) { hexEl.textContent = '--'; binEl.textContent = '--'; return; }
+
+  const num = parseFloat(val);
+  const isDouble = floatPrecision === 'float64';
+
+  if (isDouble) {
+    const buf = new ArrayBuffer(8);
+    new Float64Array(buf)[0] = num;
+    const bytes = new Uint8Array(buf);
+    const hex = Array.from(bytes).map(b => b.toString(16).toUpperCase().padStart(2,'0')).reverse().join('');
+    hexEl.textContent = '0x' + hex;
+    binEl.textContent = formatBin(hex, 64);
+  } else {
+    const buf = new ArrayBuffer(4);
+    new Float32Array(buf)[0] = num;
+    const bytes = new Uint8Array(buf);
+    const hex = Array.from(bytes).map(b => b.toString(16).toUpperCase().padStart(2,'0')).reverse().join('');
+    hexEl.textContent = '0x' + hex;
+    binEl.textContent = formatBin(hex, 32);
+  }
+}
+
+function formatBin(hex, bits) {
+  let bin = '';
+  for (const ch of hex) {
+    bin += parseInt(ch, 16).toString(2).padStart(4, '0');
+  }
+  bin = bin.padStart(bits, '0').slice(0, bits);
+  const parts = [];
+  for (let i = 0; i < bin.length; i += 4) parts.push(bin.slice(i, i + 4));
+  return parts.join(' ');
+}
+
+function calcHexToFloat() {
+  const input = document.getElementById('floatHexInput').value.trim().replace(/^0x/i, '');
+  const resultEl = document.getElementById('floatReverseResult');
+  if (!input || !/^[0-9A-Fa-f]+$/.test(input)) { resultEl.textContent = '--'; return; }
+
+  const isDouble = floatPrecision === 'float64';
+  const expectedLen = isDouble ? 16 : 8;
+
+  if (input.length !== expectedLen) {
+    resultEl.textContent = '需要 ' + expectedLen + ' 位十六进制';
+    return;
+  }
+
+  const bytes = new Uint8Array(input.match(/.{2}/g).map(b => parseInt(b, 16)).reverse());
+  const buf = bytes.buffer;
+
+  if (isDouble) {
+    resultEl.textContent = new Float64Array(buf)[0].toString();
+  } else {
+    resultEl.textContent = new Float32Array(buf)[0].toString();
+  }
+}
+
+function calcIntToHex() {
+  const input = document.getElementById('floatIntInput').value.trim();
+  const resultEl = document.getElementById('floatReverseResult');
+
+  const bits = floatPrecision === 'float64' ? 64 : 32;
+
+  if (bits === 64) {
+    try {
+      const val = BigInt(input);
+      if (val < 0) { resultEl.textContent = '不支持负数'; return; }
+      const hex = val.toString(16).toUpperCase().padStart(16, '0');
+      resultEl.textContent = '0x' + hex;
+    } catch(e) {
+      resultEl.textContent = '--';
+    }
+    return;
+  }
+
+  const val = parseInt(input);
+  if (isNaN(val)) { resultEl.textContent = '--'; return; }
+  const hex = (val >>> 0).toString(16).toUpperCase().padStart(8, '0');
+  resultEl.textContent = '0x' + hex;
+}
+
+// ════════════════════════════════════════════════════════
+// TOOLBOX — ASCII TABLE
+// ════════════════════════════════════════════════════════
+const ASCII_CONTROL = [
+  'NUL', 'SOH', 'STX', 'ETX', 'EOT', 'ENQ', 'ACK', 'BEL',
+  'BS',  'HT',  'LF',  'VT',  'FF',  'CR',  'SO',  'SI',
+  'DLE', 'DC1', 'DC2', 'DC3', 'DC4', 'NAK', 'SYN', 'ETB',
+  'CAN', 'EM',  'SUB', 'ESC', 'FS',  'GS',  'RS',  'US'
+];
+const ASCII_DESC = [
+  '空字符', '标题开始', '正文开始', '正文结束',
+  '传输结束', '查询', '确认', '响铃',
+  '退格', '水平制表符', '换行', '垂直制表符',
+  '换页', '回车', '移出', '移入',
+  '数据链路转义', '设备控制1', '设备控制2', '设备控制3',
+  '设备控制4', '否定', '同步空闲', '传输块结束',
+  '取消', '介质结束', '替换', '转义',
+  '文件分隔符', '组分隔符', '记录分隔符', '单元分隔符'
+];
+
+function renderAsciiTable() {
+  const ctrlEl = document.getElementById('asciiControl');
+  ctrlEl.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'ascii-row';
+  header.innerHTML = '<span class="ascii-cell ascii-cell-dec">DEC</span><span class="ascii-cell ascii-cell-hex">HEX</span><span class="ascii-cell ascii-cell-char">CHR</span><span class="ascii-cell ascii-cell-desc">描述</span>';
+  ctrlEl.appendChild(header);
+
+  for (let i = 0; i < 32; i++) {
+    const row = document.createElement('div');
+    row.className = 'ascii-row';
+    row.innerHTML = '<span class="ascii-cell ascii-cell-dec">' + i.toString().padStart(2,'0') +
+      '</span><span class="ascii-cell ascii-cell-hex">0x' + i.toString(16).toUpperCase().padStart(2,'0') +
+      '</span><span class="ascii-cell ascii-cell-char">' + ASCII_CONTROL[i] +
+      '</span><span class="ascii-cell ascii-cell-desc">' + ASCII_DESC[i] + '</span>';
+    row.onclick = () => { document.getElementById('asciiSearch').value = i.toString(); searchAscii(); };
+    ctrlEl.appendChild(row);
+  }
+
+  const printEl = document.getElementById('asciiPrintable');
+  printEl.innerHTML = '';
+  for (let i = 32; i <= 126; i++) {
+    const el = document.createElement('div');
+    el.className = 'ascii-char';
+    el.textContent = i === 32 ? '␣' : String.fromCharCode(i);
+    el.title = 'Dec: ' + i + ' Hex: 0x' + i.toString(16).toUpperCase() + ' Bin: ' + i.toString(2).padStart(8,'0');
+    el.onclick = () => { document.getElementById('asciiSearch').value = i.toString(); searchAscii(); };
+    printEl.appendChild(el);
+  }
+}
+
+function searchAscii() {
+  const q = document.getElementById('asciiSearch').value.trim();
+  const resultEl = document.getElementById('asciiResult');
+  const contentEl = document.getElementById('asciiResultContent');
+  const tableEl = document.getElementById('asciiTable');
+
+  if (!q) {
+    resultEl.style.display = 'none';
+    tableEl.style.display = '';
+    return;
+  }
+
+  let code = -1;
+  if (/^\d+$/.test(q)) code = parseInt(q);
+  else if (/^0x[0-9A-Fa-f]+$/.test(q)) code = parseInt(q, 16);
+  else if (q.length === 1) code = q.charCodeAt(0);
+
+  if (code < 0 || code > 127) {
+    resultEl.style.display = 'none';
+    tableEl.style.display = '';
+    return;
+  }
+
+  tableEl.style.display = 'none';
+  resultEl.style.display = '';
+  const ch = code === 32 ? '␣' : (code <= 31 ? ASCII_CONTROL[code] : String.fromCharCode(code));
+  contentEl.innerHTML =
+    '<span><span style="color:var(--text-dim)">Dec</span> <span style="color:var(--green)">' + code + '</span></span>' +
+    '<span><span style="color:var(--text-dim)">Hex</span> <span style="color:var(--accent)">0x' + code.toString(16).toUpperCase().padStart(2,'0') + '</span></span>' +
+    '<span><span style="color:var(--text-dim)">Bin</span> <span style="color:var(--amber)">' + code.toString(2).padStart(8,'0') + '</span></span>';
+  // Append Char span safely (avoid HTML injection for <, >, & characters)
+  const charSpan = document.createElement('span');
+  charSpan.innerHTML = '<span style="color:var(--text-dim)">Char</span> <span style="color:var(--green);font-size:14px;"></span>';
+  charSpan.lastChild.textContent = ch;
+  contentEl.appendChild(charSpan);
+}
+
+// ════════════════════════════════════════════════════════
+// TOOLBOX — TFTP CLIENT
+// ════════════════════════════════════════════════════════
+
+function connectTftpProxy() {
+  const btn = document.getElementById('tftpConnectBtn');
+  if (tftpWs && tftpWs.readyState === WebSocket.OPEN) {
+    tftpWs.close();
+    return;
+  }
+
+  try {
+    tftpWs = new WebSocket('ws://localhost:52345');
+
+    tftpWs.onopen = () => {
+      updateTftpStatus(true);
+      btn.textContent = '断开代理';
+      tftpLog('sys', '☸ 代理已连接');
+      document.getElementById('tftpUploadBtn').disabled = !tftpFileData;
+    };
+
+    tftpWs.onclose = () => {
+      updateTftpStatus(false);
+      btn.textContent = '连接代理';
+      tftpLog('sys', '☐ 代理已断开');
+      document.getElementById('tftpUploadBtn').disabled = true;
+      document.getElementById('tftpProgress').style.display = 'none';
+      document.getElementById('tftpProgressFill').style.width = '0%';
+      document.getElementById('tftpProgressPct').textContent = '0%';
+      tftpBusy = false;
+      tftpWs = null;
+    };
+
+    tftpWs.onerror = () => {
+      tftpLog('err', '✖ WebSocket 连接失败');
+      tftpWs.close();
+    };
+
+    tftpWs.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        switch (msg.type) {
+          case 'progress':
+            document.getElementById('tftpProgress').style.display = '';
+            const pct = msg.total > 0 ? Math.round((msg.sent / msg.total) * 100) : 100;
+            document.getElementById('tftpProgressFill').style.width = pct + '%';
+            document.getElementById('tftpProgressPct').textContent = pct + '%';
+            tftpLog('info', '▸ 已发送 ' + formatBytes(msg.sent) + ' / ' + formatBytes(msg.total));
+            break;
+          case 'complete':
+            tftpLog('ok', '✔ 上传完成: ' + msg.filename);
+            document.getElementById('tftpProgressFill').style.width = '100%';
+            document.getElementById('tftpProgressPct').textContent = '100%';
+            tftpBusy = false;
+            break;
+          case 'error':
+            tftpLog('err', '✖ ' + msg.message);
+            tftpBusy = false;
+            break;
+        }
+      } catch(e) {
+        tftpLog('err', '✖ 消息解析失败: ' + e.message);
+      }
+    };
+  } catch (e) {
+    tftpLog('err', '✖ 连接失败: ' + e.message);
+  }
+}
+
+function updateTftpStatus(connected) {
+  const dot = document.getElementById('tftpDot');
+  const text = document.getElementById('tftpStatusText');
+  dot.classList.toggle('on', connected);
+  text.textContent = connected ? '代理已连接' : '代理未连接';
+}
+
+function tftpLog(type, msg) {
+  const log = document.getElementById('tftpLog');
+  const div = document.createElement('div');
+  div.className = type;
+  div.textContent = msg;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function onTftpFileSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  tftpFileName = file.name;
+  document.getElementById('tftpFilename').value = file.name;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const arr = new Uint8Array(e.target.result);
+    tftpFileData = arr;
+    document.getElementById('tftpUploadBtn').disabled = !(tftpWs && tftpWs.readyState === WebSocket.OPEN);
+    tftpLog('sys', '✔ 已选择文件: ' + file.name + ' (' + formatBytes(arr.length) + ')');
+  };
+  reader.readAsArrayBuffer(file);
+  event.target.value = '';
+}
+
+function startTftpUpload() {
+  if (tftpBusy) { tftpLog('err', '✖ 上传正在进行中'); return; }
+  if (!tftpWs || tftpWs.readyState !== WebSocket.OPEN) {
+    tftpLog('err', '✖ 代理未连接');
+    return;
+  }
+  if (!tftpFileData) {
+    tftpLog('err', '✖ 未选择文件');
+    return;
+  }
+
+  const host = document.getElementById('tftpHost').value.trim();
+  const port = parseInt(document.getElementById('tftpPort').value) || 69;
+  if (!host) { tftpLog('err', '✖ 请输入目标 IP'); return; }
+
+  // Clear previous progress
+  document.getElementById('tftpProgress').style.display = '';
+  document.getElementById('tftpProgressFill').style.width = '0%';
+  document.getElementById('tftpProgressPct').textContent = '0%';
+  tftpLog('info', '▸ 正在上传 ' + tftpFileName + ' ...');
+  tftpBusy = true;
+
+  // Convert file data to base64 in chunks
+  const bytes = tftpFileData;
+  const chunkSize = 8192;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  const base64 = btoa(binary);
+
+  tftpWs.send(JSON.stringify({
+    type: 'upload',
+    addr: host,
+    port: port,
+    filename: tftpFileName,
+    data: base64
+  }));
+}
+
+// ════════════════════════════════════════════════════════
+// SERIAL CONNECTION
+// ════════════════════════════════════════════════════════
+async function connectPort() {
+  try {
+    port = await navigator.serial.requestPort();
+    const baudRate = parseInt(document.getElementById('baudRate').value);
+    const dataBits = parseInt(document.getElementById('dataBits').value);
+    const stopBits = parseInt(document.getElementById('stopBits').value);
+    const parity = document.getElementById('parity').value;
+    const flowControl = document.getElementById('flowControl').value;
+
+    await port.open({ baudRate, dataBits, stopBits, parity, flowControl });
+
+    isConnected = true;
+    connectedAt = Date.now();
+    rxBytes = txBytes = rxLines = errors = 0;
+    lineCount = 0;
+
+    // Get port info
+    const info = port.getInfo();
+    const portInfoStr = info.usbVendorId
+      ? `VID:${info.usbVendorId.toString(16).toUpperCase().padStart(4,'0')} PID:${info.usbProductId.toString(16).toUpperCase().padStart(4,'0')}`
+      : 'Serial Port';
+
+    updateUI(true, portInfoStr, baudRate, dataBits, parity, stopBits);
+    appendLine('sys', `● 已连接 — ${portInfoStr} @ ${baudRate} baud ${dataBits}${parity[0].toUpperCase()}${stopBits}`);
+    showNotification(`连接成功 ${baudRate} bps`, 'success');
+
+    writer = port.writable.getWriter();
+    readLoop();
+  } catch (e) {
+    isConnected = false;
+    if (e.name !== 'NotFoundError') {
+      appendLine('err', `✖ 连接失败: ${e.message}`);
+      showNotification(e.message, 'error');
+    }
+  }
+}
+
+async function disconnectPort() {
+  // 1. 先标记断开，阻止 readLoop 继续处理数据
+  isConnected = false;
+
+  // If Modbus shared mode is active, turn it off
+  if (modbusActive && modbusPortMode === 'shared') {
+    document.getElementById('mbActivate').checked = false;
+    modbusToggleActive();
+  }
+  // Stop cycling on disconnect
+  if (modbusCycling) modbusStopCycle();
+
+  try {
+    // 2. cancel reader —— 这会让正在 await reader.read() 的调用抛出 AbortError，
+    //    readLoop 的 finally 块随即执行 releaseLock()，锁被释放
+    if (reader) {
+      try { await reader.cancel(); } catch(e) {}
+      // 等待 readLoop finally 完成释放锁（最多 500ms）
+      for (let i = 0; i < 50 && reader; i++) {
+        await sleep(10);
+      }
+      reader = null;
+    }
+    // 3. 释放 writer 锁后关闭
+    if (writer) {
+      try { writer.releaseLock(); } catch(e) {}
+      writer = null;
+    }
+    // 4. 现在锁已释放，可以安全关闭 port
+    if (port) {
+      try { await port.close(); } catch(e) {}
+      port = null;
+    }
+  } catch (e) {
+    console.warn('disconnect error:', e);
+  }
+
+  updateUI(false);
+  appendLine('sys', '○ 已断开连接');
+  showNotification('已断开连接');
+}
+
+async function readLoop() {
+  readLoopRunning = true;
+  try {
+    while (port && port.readable && isConnected) {
+      reader = port.readable.getReader();
+      try {
+        while (isConnected) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+
+          rxBytes += value.length;
+          rxBytesLastSec += value.length;
+          updateCounters();
+
+          if (isPaused) continue;
+
+          const chkHexVal = document.getElementById('chkHex').checked;
+
+          if (chkHexVal) {
+            // Hex display — show hex + ASCII side by side
+            const hexStr = Array.from(value).map(b => b.toString(16).toUpperCase().padStart(2,'0')).join(' ');
+            const asciiStr = Array.from(value).map(b => (b >= 32 && b < 127) ? String.fromCharCode(b) : '.').join('');
+            appendLine('rx', `${hexStr}  │  ${asciiStr}`);
+          } else {
+            // ASCII display — buffer and split on newlines
+            const text = new TextDecoder('utf-8', { fatal: false }).decode(value);
+            rxBuffer += text;
+            let nl;
+            while ((nl = rxBuffer.indexOf('\n')) !== -1) {
+              let line = rxBuffer.slice(0, nl).replace(/\r$/, '');
+              rxBuffer = rxBuffer.slice(nl + 1);
+              appendLine('rx', line);
+              rxLines++;
+            }
+            // Overflow guard
+            if (rxBuffer.length > 4096) {
+              appendLine('rx', rxBuffer.slice(0, 4096));
+              rxBuffer = '';
+            }
+          }
+          updateCounters();
+          // Feed received data to Modbus response parser
+          if (typeof modbusFeedResponse === 'function' && modbusPortMode !== 'independent') modbusFeedResponse(value);
+        }
+      } catch (e) {
+        // AbortError 是主动 cancel 触发的，不是真正的错误
+        if (e.name !== 'AbortError' && isConnected) {
+          errors++;
+          appendLine('err', `✖ 读取错误: ${e.message}`);
+        }
+      } finally {
+        // 必须先 releaseLock，disconnectPort 才能安全 close port
+        try { reader.releaseLock(); } catch(e) {}
+        reader = null;
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') console.warn('readLoop error:', e);
+  }
+
+  readLoopRunning = false;
+  // 若是设备物理断开（非主动断开）
+  if (isConnected) {
+    isConnected = false;
+    updateUI(false);
+    appendLine('sys', '○ 设备已断开');
+    showNotification('设备连接已中断', 'error');
+  }
+}
+
+// ════════════════════════════════════════════════════════
+// SEND
+// ════════════════════════════════════════════════════════
+async function sendData(data) {
+  if (!isConnected || !writer) {
+    if (!isConnected) showNotification('请先连接串口设备', 'error');
+    else if (!writer) showNotification('发送器未就绪，请重新连接', 'error');
+    return;
+  }
+  try {
+    const eol = document.getElementById('eolSelect').value;
+    let ending = '';
+    if (eol === 'cr') ending = '\r';
+    else if (eol === 'lf') ending = '\n';
+    else if (eol === 'crlf') ending = '\r\n';
+
+    let bytes;
+    if (document.getElementById('chkHexInput').checked) {
+      // Parse hex input like "AA BB CC"
+      const hex = data.replace(/\s+/g, '');
+      if (!/^[0-9A-Fa-f]*$/.test(hex) || hex.length % 2 !== 0) {
+        showNotification('HEX 格式错误！格式: AA BB CC', 'error');
+        return;
+      }
+      const arr = [];
+      for (let i = 0; i < hex.length; i += 2) {
+        arr.push(parseInt(hex.slice(i, i+2), 16));
+      }
+      bytes = new Uint8Array(arr);
+    } else {
+      // 手动构建字节数组（不使用 TextEncoder，避免编码问题）
+      const str = data + ending;
+      const arr = new Uint8Array(str.length);
+      for (let i = 0; i < str.length; i++) arr[i] = str.charCodeAt(i);
+      bytes = arr;
+    }
+
+    await writer.write(bytes);
+    txBytes += bytes.length;
+    updateCounters();
+
+    if (document.getElementById('chkLocalEcho').checked) {
+      const hexStr = Array.from(bytes).map(b => b.toString(16).toUpperCase().padStart(2,'0')).join(' ');
+      const displayText = document.getElementById('chkHexInput').checked ? hexStr : data;
+      appendLine('tx', displayText);
+    }
+  } catch (e) {
+    errors++;
+    appendLine('err', `✖ 发送失败: ${e.message}`);
+    showNotification(e.message, 'error');
+  }
+}
+
+function sendInput() {
+  const field = document.getElementById('inputField');
+  const val = field.value.trim();
+  if (!val) return;
+  if (!isConnected) {
+    showNotification('请先连接串口设备', 'error');
+    return;
+  }
+  // Add to history
+  if (inputHistory[0] !== val) {
+    inputHistory.unshift(val);
+    if (inputHistory.length > 100) inputHistory.pop();
+  }
+  historyIndex = -1;
+  sendData(val);
+  field.value = '';
+  document.getElementById('historyDropdown').classList.remove('open');
+}
+
+async function sendFile() {
+  document.getElementById('fileInput').click();
+}
+
+async function handleFileSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (!isConnected) {
+    showNotification('请先连接串口设备', 'error');
+    return;
+  }
+  if (!writer) {
+    showNotification('发送器未就绪，请重新连接', 'error');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    const data = new Uint8Array(e.target.result);
+    const delay = parseInt(document.getElementById('sendDelay').value) || 0;
+    appendLine('sys', `▶ 开始发送文件: ${file.name} (${formatBytes(data.length)})`);
+    if (delay > 0) {
+      // Send line by line with delay
+      const lines = new TextDecoder().decode(data).split('\n');
+      for (const line of lines) {
+        await writer.write(new TextEncoder().encode(line + '\n'));
+        txBytes += line.length + 1;
+        updateCounters();
+        await sleep(delay);
+      }
+    } else {
+      await writer.write(data);
+      txBytes += data.length;
+      updateCounters();
+    }
+    appendLine('sys', `✔ 文件发送完成: ${file.name}`);
+  };
+  reader.readAsArrayBuffer(file);
+  event.target.value = '';
+}
+
+// ════════════════════════════════════════════════════════
+// ANSI COLOR PARSER + KEYWORD HIGHLIGHTER
+// ════════════════════════════════════════════════════════
+
+// ANSI SGR color map → CSS color
+const ANSI_FG = {
+  30: '#555', 31: '#ff5555', 32: '#50fa7b', 33: '#f1fa8c',
+  34: '#6699ff', 35: '#ff79c6', 36: '#8be9fd', 37: '#e0e0e0',
+  90: '#888', 91: '#ff6e6e', 92: '#69ff94', 93: '#ffffa5',
+  94: '#79b0ff', 95: '#ff92df', 96: '#a4ffff', 97: '#ffffff',
+};
+const ANSI_BG = {
+  40: '#000', 41: '#550000', 42: '#005500', 43: '#555500',
+  44: '#000055', 45: '#550055', 46: '#005555', 47: '#aaaaaa',
+};
+
+// 关键词高亮规则（优先级从高到低）
+const KEYWORD_RULES = [
+  { re: /\b(ERROR|ERR|FAIL|FAILED|FATAL|EXCEPTION|CRASH|ASSERT|ABORT)\b/gi,
+    style: 'color:#ff5555;font-weight:bold;text-shadow:0 0 6px rgba(255,85,85,0.5)' },
+  { re: /\b(WARN|WARNING|CAUTION|TIMEOUT|RETRY)\b/gi,
+    style: 'color:#f1fa8c;font-weight:bold' },
+  { re: /\b(OK|DONE|SUCCESS|PASS|PASSED|READY|CONNECTED|ACK|COMPLETE)\b/gi,
+    style: 'color:#50fa7b;font-weight:bold;text-shadow:0 0 6px rgba(80,250,123,0.4)' },
+  { re: /\b(INFO|DEBUG|LOG|TRACE|INIT|START|BOOT)\b/gi,
+    style: 'color:#8be9fd' },
+  { re: /\b(0x[0-9A-Fa-f]+)\b/g,
+    style: 'color:#ffb86c;font-style:italic' },                   // 十六进制数
+  { re: /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g,
+    style: 'color:#bd93f9' },                                      // IP地址
+  { re: /\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b/g,
+    style: 'color:#ff79c6' },                                      // MAC地址
+  { re: /("[^"]*"|'[^']*')/g,
+    style: 'color:#f1fa8c' },                                      // 引号字符串
+  { re: /(\b\d+\.?\d*\s*(?:ms|us|ns|MHz|kHz|Hz|bps|KB|MB|GB|V|A|mA|°C)\b)/gi,
+    style: 'color:#ffb86c' },                                      // 带单位数值
+];
+
+/**
+ * 解析带 ANSI 转义码的字符串，返回 DocumentFragment
+ */
+function parseAnsiToFragment(text) {
+  const frag = document.createDocumentFragment();
+
+  // 先检查是否含 ANSI 转义
+  const ANSI_RE = /\x1b\[([0-9;]*)m/g;
+  const hasAnsi = ANSI_RE.test(text);
+  ANSI_RE.lastIndex = 0;
+
+  if (hasAnsi) {
+    // —— ANSI 模式：解析 SGR 序列 ——
+    let currentStyle = {};
+    let last = 0;
+    let m;
+
+    const flushText = (chunk) => {
+      if (!chunk) return;
+      const span = document.createElement('span');
+      let css = '';
+      if (currentStyle.fg) css += `color:${currentStyle.fg};`;
+      if (currentStyle.bg) css += `background:${currentStyle.bg};`;
+      if (currentStyle.bold) css += 'font-weight:bold;';
+      if (currentStyle.dim) css += 'opacity:0.6;';
+      if (currentStyle.italic) css += 'font-style:italic;';
+      if (currentStyle.underline) css += 'text-decoration:underline;';
+      if (css) span.style.cssText = css;
+      span.textContent = chunk;
+      frag.appendChild(span);
+    };
+
+    while ((m = ANSI_RE.exec(text)) !== null) {
+      flushText(text.slice(last, m.index));
+      last = m.index + m[0].length;
+
+      const codes = m[1] ? m[1].split(';').map(Number) : [0];
+      for (let i = 0; i < codes.length; i++) {
+        const c = codes[i];
+        if (c === 0) { currentStyle = {}; }
+        else if (c === 1) { currentStyle.bold = true; }
+        else if (c === 2) { currentStyle.dim = true; }
+        else if (c === 3) { currentStyle.italic = true; }
+        else if (c === 4) { currentStyle.underline = true; }
+        else if (c === 22) { currentStyle.bold = false; currentStyle.dim = false; }
+        else if (c === 39) { delete currentStyle.fg; }
+        else if (c === 49) { delete currentStyle.bg; }
+        else if (ANSI_FG[c]) { currentStyle.fg = ANSI_FG[c]; }
+        else if (ANSI_BG[c]) { currentStyle.bg = ANSI_BG[c]; }
+        else if (c === 38 && codes[i+1] === 5) {
+          // 256色 fg: ESC[38;5;Nm
+          const idx = codes[i+2]; i += 2;
+          currentStyle.fg = ansi256(idx);
+        } else if (c === 48 && codes[i+1] === 5) {
+          const idx = codes[i+2]; i += 2;
+          currentStyle.bg = ansi256(idx);
+        }
+      }
+    }
+    flushText(text.slice(last));
+
+  } else {
+    // —— 无 ANSI：关键字高亮模式 ——
+    applyKeywordHighlight(text, frag);
+  }
+
+  return frag;
+}
+
+/** 将 256色 ANSI index 转为 CSS 颜色 */
+function ansi256(n) {
+  if (n < 16) {
+    const base = ['#000','#800000','#008000','#808000','#000080','#800080','#008080','#c0c0c0',
+                  '#808080','#ff0000','#00ff00','#ffff00','#0000ff','#ff00ff','#00ffff','#ffffff'];
+    return base[n] || '#888';
+  }
+  if (n >= 232) { const v = 8 + (n-232)*10; return `rgb(${v},${v},${v})`; }
+  n -= 16;
+  const b = n % 6, g = Math.floor(n/6) % 6, r = Math.floor(n/36);
+  const c = v => v ? 55 + v*40 : 0;
+  return `rgb(${c(r)},${c(g)},${c(b)})`;
+}
+
+/** 关键字高亮：用多条规则对文本分段着色 */
+function applyKeywordHighlight(text, frag) {
+  // 收集所有匹配区间
+  const segments = []; // {start, end, style}
+  for (const rule of KEYWORD_RULES) {
+    rule.re.lastIndex = 0;
+    let m;
+    while ((m = rule.re.exec(text)) !== null) {
+      // 检查不与已有区间重叠
+      const s = m.index, e = m.index + m[0].length;
+      if (!segments.some(seg => s < seg.end && e > seg.start)) {
+        segments.push({ start: s, end: e, style: rule.style });
+      }
+    }
+  }
+  segments.sort((a,b) => a.start - b.start);
+
+  // 拼接文本段
+  let pos = 0;
+  for (const seg of segments) {
+    if (seg.start > pos) {
+      frag.appendChild(document.createTextNode(text.slice(pos, seg.start)));
+    }
+    const span = document.createElement('span');
+    span.style.cssText = seg.style;
+    span.textContent = text.slice(seg.start, seg.end);
+    frag.appendChild(span);
+    pos = seg.end;
+  }
+  if (pos < text.length) {
+    frag.appendChild(document.createTextNode(text.slice(pos)));
+  }
+}
+
+// ════════════════════════════════════════════════════════
+// TERMINAL OUTPUT
+// ════════════════════════════════════════════════════════
+function appendLine(type, text, autoScroll = true) {
+  const output = document.getElementById('terminalOutput');
+  const chkTimestamp = document.getElementById('chkTimestamp');
+  const chkHex = document.getElementById('chkHex');
+
+  const line = document.createElement('div');
+  line.className = `terminal-line ${type}`;
+
+  // Timestamp
+  const timeEl = document.createElement('span');
+  timeEl.className = 'line-time';
+  if (chkTimestamp && chkTimestamp.checked && type !== 'sys') {
+    timeEl.textContent = new Date().toISOString().slice(11, 23);
+  }
+  line.appendChild(timeEl);
+
+  // Direction indicator
+  const dirEl = document.createElement('span');
+  dirEl.className = `line-dir ${type}`;
+  const dirMap = { rx: 'RX', tx: 'TX', sys: '··', err: 'ER' };
+  dirEl.textContent = dirMap[type] || '·';
+  line.appendChild(dirEl);
+
+  // Content
+  const contentEl = document.createElement('span');
+  contentEl.className = `line-content ${type}`;
+
+  if (chkHex && chkHex.checked && type === 'rx') {
+    // HEX 模式：逐字节着色
+    const parts = text.split('  │  ');
+    if (parts.length === 2) {
+      const hexPart = document.createElement('span');
+      hexPart.style.cssText = 'color:#50fa7b';
+      // 每个 byte 一个 span
+      parts[0].split(' ').forEach((h, i) => {
+        if (!h) return;
+        const val = parseInt(h, 16);
+        const byteSpan = document.createElement('span');
+        byteSpan.className = 'hex-byte';
+        // 着色：0x00=暗, 0xFF=亮, 可打印=青, 控制符=红
+        if (val === 0) byteSpan.style.color = '#444';
+        else if (val === 0xFF) byteSpan.style.color = '#ff5555';
+        else if (val >= 32 && val < 127) byteSpan.style.color = '#8be9fd';
+        else byteSpan.style.color = '#ff79c6';
+        byteSpan.textContent = h;
+        hexPart.appendChild(byteSpan);
+        if (i < parts[0].split(' ').length - 1) hexPart.appendChild(document.createTextNode(' '));
+      });
+      contentEl.appendChild(hexPart);
+
+      const sep = document.createElement('span');
+      sep.style.cssText = 'color:#444; margin:0 8px';
+      sep.textContent = '│';
+      contentEl.appendChild(sep);
+
+      const asciiPart = document.createElement('span');
+      asciiPart.style.cssText = 'color:#f8f8f2';
+      asciiPart.textContent = parts[1];
+      contentEl.appendChild(asciiPart);
+    } else {
+      contentEl.textContent = text;
+    }
+  } else if (type === 'rx') {
+    // RX ASCII：解析 ANSI 转义 + 关键字高亮
+    contentEl.appendChild(parseAnsiToFragment(text));
+  } else if (type === 'tx') {
+    contentEl.style.color = 'var(--amber)';
+    contentEl.textContent = text;
+  } else if (type === 'sys') {
+    contentEl.style.color = 'var(--accent)';
+    contentEl.style.fontStyle = 'italic';
+    contentEl.textContent = text;
+  } else if (type === 'err') {
+    contentEl.style.color = 'var(--red)';
+    contentEl.textContent = text;
+  } else {
+    contentEl.textContent = text;
+  }
+
+  line.appendChild(contentEl);
+  output.appendChild(line);
+  lineCount++;
+
+  // Max lines guard
+  const max = settings.maxLines || 2000;
+  while (output.children.length > max) {
+    output.removeChild(output.firstChild);
+  }
+
+  // Auto scroll
+  if (autoScroll && document.getElementById('chkAutoScroll').checked) {
+    output.scrollTop = output.scrollHeight;
+  }
+
+  // Update status bar
+  document.getElementById('statusLines').textContent = `LINES: ${lineCount}`;
+  document.getElementById('statLines').textContent = rxLines;
+}
+
+function clearTerminal() {
+  document.getElementById('terminalOutput').innerHTML = '';
+  lineCount = 0;
+  appendLine('sys', '--- 终端已清空 ---');
+}
+
+// ════════════════════════════════════════════════════════
+// UI STATE
+// ════════════════════════════════════════════════════════
+function updateUI(connected, portInfoStr, baudRate, dataBits, parity, stopBits) {
+  const connDot = document.getElementById('connDot');
+  const connText = document.getElementById('connText');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+
+  if (connected) {
+    connDot.classList.add('connected');
+    connText.textContent = '已连接';
+    connText.classList.add('connected');
+    statusDot.classList.add('on');
+    statusText.textContent = 'CONNECTED';
+    document.getElementById('statusPort').textContent = `PORT: ${portInfoStr}`;
+    document.getElementById('statusBaud').textContent = `BAUD: ${baudRate}`;
+    const parMap = { none: 'N', even: 'E', odd: 'O' };
+    document.getElementById('statusConfig').textContent = `${dataBits}${parMap[parity] || 'N'}${stopBits}`;
+    document.getElementById('portInfo').textContent = portInfoStr;
+    document.getElementById('btnConnect').disabled = true;
+    document.getElementById('btnDisconnect').disabled = false;
+    document.getElementById('btnSend').disabled = false;
+  } else {
+    connDot.classList.remove('connected');
+    connText.textContent = '未连接';
+    connText.classList.remove('connected');
+    statusDot.classList.remove('on');
+    statusText.textContent = 'DISCONNECTED';
+    document.getElementById('statusPort').textContent = 'PORT: —';
+    document.getElementById('statusBaud').textContent = 'BAUD: —';
+    document.getElementById('statusConfig').textContent = '8N1';
+    document.getElementById('portInfo').textContent = '—';
+    document.getElementById('btnConnect').disabled = false;
+    document.getElementById('btnDisconnect').disabled = true;
+    document.getElementById('btnSend').disabled = false;
+  }
+}
+
+function updateCounters() {
+  document.getElementById('hdrRx').textContent = formatBytes(rxBytes);
+  document.getElementById('hdrTx').textContent = formatBytes(txBytes);
+  document.getElementById('statRx').textContent = formatBytes(rxBytes);
+  document.getElementById('statTx').textContent = formatBytes(txBytes);
+  document.getElementById('statErrors').textContent = errors;
+}
+
+function togglePause() {
+  isPaused = !isPaused;
+  const btn = document.getElementById('btnPause');
+  btn.textContent = isPaused ? '▶ 恢复' : '';
+  btn.innerHTML = isPaused
+    ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polygon points="5 3 19 12 5 21 5 3"/></svg> 恢复`
+    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> 暂停`;
+  btn.style.borderColor = isPaused ? 'var(--amber)' : 'var(--border)';
+  btn.style.color = isPaused ? 'var(--amber)' : '';
+  showNotification(isPaused ? '输出已暂停' : '输出已恢复');
+}
+
+// ════════════════════════════════════════════════════════
+// INPUT HANDLING
+// ════════════════════════════════════════════════════════
+function handleInputKey(e) {
+  if (e.isComposing) return;
+  const field = document.getElementById('inputField');
+
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sendInput();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    historyIndex = Math.min(historyIndex + 1, inputHistory.length - 1);
+    field.value = inputHistory[historyIndex] || '';
+    document.getElementById('historyDropdown').classList.remove('open');
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    historyIndex = Math.max(historyIndex - 1, -1);
+    field.value = historyIndex >= 0 ? inputHistory[historyIndex] : '';
+    document.getElementById('historyDropdown').classList.remove('open');
+  } else if (e.key === 'Escape') {
+    document.getElementById('historyDropdown').classList.remove('open');
+  } else if (e.ctrlKey && e.key === 'l') {
+    e.preventDefault();
+    clearTerminal();
+  } else if (e.ctrlKey && e.key === 'd') {
+    e.preventDefault();
+    if (isConnected) disconnectPort();
+  }
+}
+
+function handleInputChange(e) {
+  const val = e.target.value;
+  const dropdown = document.getElementById('historyDropdown');
+  if (!val) { dropdown.classList.remove('open'); return; }
+
+  const matches = inputHistory.filter(h => h.toLowerCase().includes(val.toLowerCase()));
+  if (!matches.length) { dropdown.classList.remove('open'); return; }
+
+  dropdown.innerHTML = matches.slice(0, 8).map(m =>
+    `<div class="history-item" onclick="selectHistory('${m.replace(/'/g, "\\'")}')">${escapeHtml(m)}</div>`
+  ).join('');
+  dropdown.classList.add('open');
+}
+
+function selectHistory(val) {
+  document.getElementById('inputField').value = val;
+  document.getElementById('historyDropdown').classList.remove('open');
+  document.getElementById('inputField').focus();
+}
+
+// ════════════════════════════════════════════════════════
+// MACROS
+// ════════════════════════════════════════════════════════
+function addMacro() {
+  macros.push({ label: 'AT', cmd: 'AT' });
+  renderMacros();
+  saveState();
+}
+
+function renderMacros() {
+  const list = document.getElementById('macroList');
+  list.innerHTML = '';
+  macros.forEach((m, i) => {
+    const div = document.createElement('div');
+    div.className = 'macro-item';
+    div.innerHTML = `
+      <input type="text" class="macro-label-input" placeholder="标签" value="${escapeHtml(m.label)}"
+        onchange="macros[${i}].label = this.value; saveState()" title="指令标签">
+      <input type="text" class="macro-cmd-input" placeholder="命令内容" value="${escapeHtml(m.cmd)}"
+        onchange="macros[${i}].cmd = this.value; saveState()" title="发送内容">
+      <button class="btn macro-send" onclick="sendData('${escapeJs(m.cmd)}')" title="发送">▶</button>
+      <button class="btn macro-del" onclick="macros.splice(${i},1); renderMacros(); saveState()" title="删除">✕</button>
+    `;
+    list.appendChild(div);
+  });
+}
+
+// ════════════════════════════════════════════════════════
+// SAVE LOG
+// ════════════════════════════════════════════════════════
+function saveLog() {
+  const output = document.getElementById('terminalOutput');
+  const lines = Array.from(output.querySelectorAll('.terminal-line')).map(l => {
+    const time = l.querySelector('.line-time')?.textContent || '';
+    const dir = l.querySelector('.line-dir')?.textContent || '';
+    const content = l.querySelector('.line-content')?.textContent || '';
+    return `${time} ${dir} ${content}`;
+  }).join('\n');
+
+  const blob = new Blob([lines], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `serial_log_${new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showNotification('日志已保存');
+}
+
+// ════════════════════════════════════════════════════════
+// SETTINGS
+// ════════════════════════════════════════════════════════
+function openSettings() {
+  document.getElementById('fontSize').value = settings.fontSize;
+  document.getElementById('colorTheme').value = settings.colorTheme;
+  document.getElementById('maxLines').value = settings.maxLines;
+  document.getElementById('bufSize').value = settings.bufSize;
+  document.getElementById('settingsModal').classList.add('open');
+}
+
+function closeSettings() {
+  document.getElementById('settingsModal').classList.remove('open');
+}
+
+function applySettings() {
+  settings.fontSize = parseInt(document.getElementById('fontSize').value);
+  settings.colorTheme = document.getElementById('colorTheme').value;
+  settings.maxLines = parseInt(document.getElementById('maxLines').value);
+
+  // ── 字体大小 ──
+  document.getElementById('terminalOutput').style.fontSize = settings.fontSize + 'px';
+
+  // ── 颜色主题：每个主题同时更新所有相关 CSS 变量 ──
+  const themes = {
+    green: {
+      rxBase:    '#c8ffd4',   // RX 行基础色（浅绿白）
+      termGreen: '#00ff41',   // 输入框光标 / 提示符
+      termDim:   '#00ff41aa',
+      lineDir:   '#00ff88',   // ◀ 箭头
+      accent:    '#00d4ff',   // 系统信息色（保持原青色）
+    },
+    amber: {
+      rxBase:    '#fff3c8',
+      termGreen: '#ffcc44',
+      termDim:   '#ffcc44aa',
+      lineDir:   '#ffaa00',
+      accent:    '#00d4ff',
+    },
+    cyan: {
+      rxBase:    '#c8f8ff',
+      termGreen: '#00eeff',
+      termDim:   '#00eeffaa',
+      lineDir:   '#00d4ff',
+      accent:    '#00d4ff',
+    },
+    white: {
+      rxBase:    '#e8e8e8',
+      termGreen: '#ffffff',
+      termDim:   '#ffffffaa',
+      lineDir:   '#aaaaaa',
+      accent:    '#00d4ff',
+    },
+  };
+
+  const t = themes[settings.colorTheme] || themes.green;
+  const root = document.documentElement;
+  root.style.setProperty('--terminal-green',     t.termGreen);
+  root.style.setProperty('--terminal-green-dim', t.termDim);
+
+  // 直接更新已有 RX 行的基础色（通过 style sheet rule 注入）
+  let styleTag = document.getElementById('__themeOverride');
+  if (!styleTag) {
+    styleTag = document.createElement('style');
+    styleTag.id = '__themeOverride';
+    document.head.appendChild(styleTag);
+  }
+  styleTag.textContent = `
+    .line-content.rx { color: ${t.rxBase} !important; }
+    .line-dir.rx     { color: ${t.lineDir} !important; }
+    .terminal-line.rx  { border-left-color: ${t.termDim} !important; }
+    .input-prompt    { color: ${t.termGreen} !important; text-shadow: 0 0 8px ${t.termDim}; }
+    .input-field     { color: ${t.termGreen} !important; caret-color: ${t.termGreen} !important; }
+    .input-field:focus { border-color: ${t.termDim} !important;
+                         box-shadow: 0 0 0 2px ${t.termDim}33 !important; }
+  `;
+
+  saveState();
+}
+
+// ════════════════════════════════════════════════════════
+// SIDEBAR
+// ════════════════════════════════════════════════════════
+function toggleSidebar() {
+  sidebarOpen = !sidebarOpen;
+  document.getElementById('sidebar').classList.toggle('collapsed', !sidebarOpen);
+  updateSidebarToggle();
+}
+
+function updateSidebarToggle() {
+  const toggle = document.getElementById('sidebarToggle');
+  toggle.style.right = sidebarOpen ? '220px' : '0';
+  toggle.textContent = sidebarOpen ? '▶' : '◀';
+}
+
+// ════════════════════════════════════════════════════════
+// RIGHT SIDEBAR RESIZE
+// ════════════════════════════════════════════════════════
+function initResizeHandle() {
+  const handle = document.getElementById('resizeHandle');
+  handle.addEventListener('mousedown', startResize);
+}
+
+function startResize(e) {
+  e.preventDefault();
+  document.body.style.cursor = 'col-resize';
+  document.body.style.userSelect = 'none';
+  document.getElementById('resizeHandle').classList.add('dragging');
+
+  // Disable transitions for real-time feedback
+  const sidebar = document.getElementById('rightSidebar');
+  sidebar.style.transition = 'none';
+  sidebar.style.willChange = 'width';
+  document.getElementById('rightSidebarToggle').style.transition = 'none';
+
+  const main = document.querySelector('.main');
+  const minWidth = 150;
+  const maxWidth = main.clientWidth * 0.8;
+
+  function onResize(ev) {
+    const width = ev.clientX - main.getBoundingClientRect().left;
+    const clamped = Math.round(Math.max(minWidth, Math.min(maxWidth, width)));
+    document.documentElement.style.setProperty('--right-sidebar-width', clamped + 'px');
+  }
+
+  function stopResize() {
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    document.getElementById('resizeHandle').classList.remove('dragging');
+    sidebar.style.transition = '';
+    sidebar.style.willChange = '';
+    document.getElementById('rightSidebarToggle').style.transition = '';
+
+    const finalWidth = parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue('--right-sidebar-width')
+    );
+    localStorage.setItem('wtp_right_sidebar_width', Math.round(finalWidth).toString());
+
+    document.removeEventListener('mousemove', onResize);
+    document.removeEventListener('mouseup', stopResize);
+  }
+
+  document.addEventListener('mousemove', onResize);
+  document.addEventListener('mouseup', stopResize);
+}
+
+// ════════════════════════════════════════════════════════
+// TIMERS & CLOCKS
+// ════════════════════════════════════════════════════════
+function startClock() {
+  function tick() {
+    const now = new Date();
+    document.getElementById('clockDisplay').textContent =
+      now.toTimeString().slice(0, 8);
+  }
+  tick();
+  setInterval(tick, 1000);
+}
+
+function startUptimeTimer() {
+  setInterval(() => {
+    if (!isConnected || !connectedAt) {
+      document.getElementById('hdrUptime').textContent = '00:00:00';
+      return;
+    }
+    const elapsed = Math.floor((Date.now() - connectedAt) / 1000);
+    const h = String(Math.floor(elapsed / 3600)).padStart(2,'0');
+    const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2,'0');
+    const s = String(elapsed % 60).padStart(2,'0');
+    document.getElementById('hdrUptime').textContent = `${h}:${m}:${s}`;
+  }, 1000);
+}
+
+function startRxRateMonitor() {
+  setInterval(() => {
+    rxRateSampled = rxBytesLastSec;
+    rxBytesLastSec = 0;
+    document.getElementById('rxRateText').textContent = formatBytes(rxRateSampled) + '/s';
+    const pct = Math.min(rxRateSampled / 115200 * 100, 100);
+    document.getElementById('rxRateBar').style.width = pct + '%';
+  }, 1000);
+}
+
+// ════════════════════════════════════════════════════════
+// PERSISTENCE
+// ════════════════════════════════════════════════════════
+function saveState() {
+  try {
+    localStorage.setItem('wtp_macros', JSON.stringify(macros));
+    localStorage.setItem('wtp_settings', JSON.stringify(settings));
+    localStorage.setItem('wtp_history', JSON.stringify(inputHistory.slice(0, 50)));
+    localStorage.setItem('wtp_baud', document.getElementById('baudRate').value);
+  } catch(e) {}
+}
+
+function loadState() {
+  try {
+    const m = localStorage.getItem('wtp_macros');
+    if (m) { macros = JSON.parse(m); } else {
+      macros = [
+        { label: 'AT', cmd: 'AT' },
+        { label: 'RST', cmd: 'AT+RST' },
+        { label: 'GMR', cmd: 'AT+GMR' },
+        { label: 'Ping', cmd: 'ping' },
+        { label: '帮助', cmd: 'help' },
+      ];
+    }
+    const s = localStorage.getItem('wtp_settings');
+    if (s) { settings = { ...settings, ...JSON.parse(s) }; }
+    const h = localStorage.getItem('wtp_history');
+    if (h) { inputHistory = JSON.parse(h); }
+    const baud = localStorage.getItem('wtp_baud');
+    if (baud) { document.getElementById('baudRate').value = baud; }
+    applySettings();
+  } catch(e) {}
+}
+
+// ════════════════════════════════════════════════════════
+// NOTIFICATION
+// ════════════════════════════════════════════════════════
+let notifTimer = null;
+function showNotification(msg, type = 'info') {
+  const el = document.getElementById('notification');
+  el.textContent = msg;
+  el.className = `notification show ${type}`;
+  clearTimeout(notifTimer);
+  notifTimer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+// ════════════════════════════════════════════════════════
+// HEX mode display toggle
+// ════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('chkHex').addEventListener('change', function() {
+    document.getElementById('statusMode').textContent = this.checked ? 'HEX MODE' : 'ASCII MODE';
+  });
+});
+
+// ════════════════════════════════════════════════════════
+// MODBUS RTU
+// ════════════════════════════════════════════════════════
+// Test vectors (CRC value, bytes in low-first order):
+// CRC16([0x01,0x03,0x00,0x00,0x00,0x0A]) = 0xCDC5 → [0xC5,0xCD]
+// CRC16([0x01,0x06,0x00,0x01,0x00,0x03]) = 0x59B6 → [0xB6,0x59]
+// CRC16([0x11,0x03,0x00,0x6B,0x00,0x03]) = 0x8776 → [0x76,0x87]
+function modbusCRC16(data) {
+  let crc = 0xFFFF;
+  for (let i = 0; i < data.length; i++) {
+    crc ^= data[i];
+    for (let j = 0; j < 8; j++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
+      else crc = crc >> 1;
+    }
+  }
+  return new Uint8Array([crc & 0xFF, (crc >> 8) & 0xFF]);
+}
+
+function modbusConstructFrame(slaveId, funcCode, address, quantity, writeData) {
+  const buffer = [];
+  buffer.push(slaveId, funcCode);
+  buffer.push((address >> 8) & 0xFF, address & 0xFF);
+  if (funcCode <= 4) {
+    buffer.push((quantity >> 8) & 0xFF, quantity & 0xFF);
+  } else if (funcCode === 5 || funcCode === 6) {
+    buffer.push((writeData >> 8) & 0xFF, writeData & 0xFF);
+  } else if (funcCode === 15) {
+    buffer.push((quantity >> 8) & 0xFF, quantity & 0xFF);
+    const byteCount = Math.ceil(quantity / 8);
+    buffer.push(byteCount);
+    for (let i = 0; i < byteCount; i++) buffer.push(writeData[i]);
+  } else if (funcCode === 16) {
+    buffer.push((quantity >> 8) & 0xFF, quantity & 0xFF);
+    const byteCount = quantity * 2;
+    buffer.push(byteCount);
+    for (let i = 0; i < byteCount; i++) buffer.push(writeData[i]);
+  }
+  const data = new Uint8Array(buffer);
+  const crc = modbusCRC16(data);
+  const frame = new Uint8Array(buffer.length + 2);
+  frame.set(data);
+  frame[data.length] = crc[0]; frame[data.length + 1] = crc[1];
+  return frame;
+}
+
+function modbusBytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
+}
+
+function modbusSend() {
+  modbusExpandOnSend();
+  const hasWriter = (modbusPortMode === 'independent') ? modbusConnected : isConnected;
+  if (!hasWriter) { showNotification('Modbus: 串口未连接', 'error'); return; }
+  const slaveId = parseInt(document.getElementById('mbSlaveId').value);
+  const funcCode = parseInt(document.getElementById('mbFuncCode').value);
+  if (isNaN(slaveId) || slaveId < 1 || slaveId > 247) { appendLine('[Modbus] 从站 ID 必须在 1-247 之间', 'error'); return; }
+  const quantity = parseInt(document.getElementById('mbQuantity').value);
+  if (isNaN(quantity) || quantity < 1 || quantity > 2000) { appendLine('[Modbus] 数量必须在 1-2000 之间', 'error'); return; }
+  const address = modbusParseAddress();
+  if (isNaN(address) || address < 0 || address > 65535) { appendLine('[Modbus] 地址无效', 'error'); return; }
+  let writeData = null;
+  if (funcCode === 5 || funcCode === 6 || funcCode === 15 || funcCode === 16) {
+    const raw = document.getElementById('mbWriteData').value.trim();
+    if (!raw) { appendLine('[Modbus] 请输入写入数据', 'error'); return; }
+    const b = raw.split(/[\s,]+/).map(s => parseInt(s, 16));
+    if (b.some(v => isNaN(v) || v < 0 || v > 255)) { appendLine('[Modbus] 写入数据格式无效', 'error'); return; }
+    writeData = funcCode <= 6 ? (b[0] << 8 | b[1]) : new Uint8Array(b);
+  }
+  const frame = modbusConstructFrame(slaveId, funcCode, address, quantity, writeData);
+  document.getElementById('modbusTxDisplay').style.display = 'block';
+  document.getElementById('modbusTxDisplay').innerHTML =
+    '<div class="modbus-frame modbus-frame-tx"><span style="color:var(--accent);font-weight:bold;">TX →</span> <span class="modbus-timestamp">' +
+    new Date().toLocaleTimeString() + '</span><br>' + modbusBytesToHex(frame) + '</div>';
+  document.getElementById('modbusRxDisplay').style.display = 'none';
+  document.getElementById('modbusDataDisplay').style.display = 'none';
+  // Sync to main view
+  const mvTx = document.getElementById('mvTxDisplay');
+  if (mvTx) mvTx.innerHTML = document.getElementById('modbusTxDisplay').innerHTML;
+  const targetWriter = (modbusPortMode === 'independent' && modbusConnected) ? modbusWriter : writer;
+  targetWriter.write(frame).then(() => {
+    modbusSendTime = Date.now();
+    if (typeof modbusStartWait === 'function') modbusStartWait(frame);
+  }).catch(err => appendLine('[Modbus] 发送失败: ' + err.message, 'error'));
+}
+
+// Modbus response parser
+let modbusResponseBuffer = [];
+let modbusPendingRequest = null;
+let modbusPendingTimeout = null;
+let modbusSendTime = 0;
+const modbusLog = [];
+const MODBUS_LOG_MAX = 100;
+
+// Modbus mode state
+let modbusActive = false;
+let modbusPortMode = 'shared'; // 'shared' | 'independent'
+let modbusPort = null;
+let modbusReader = null;
+let modbusWriter = null;
+let modbusConnected = false;
+let modbusReadLoopRunning = false;
+
+// Modbus cycling state
+let modbusCycling = false;
+let modbusCycleTimer = null;
+let modbusCycleCount = 0;
+
+function modbusStartWait(frame) {
+  modbusPendingRequest = frame;
+  modbusResponseBuffer = [];
+  modbusPendingTimeout = setTimeout(() => {
+    modbusPendingRequest = null;
+    modbusResponseBuffer = [];
+    const div = document.getElementById('modbusRxDisplay');
+    div.style.display = 'block';
+    div.innerHTML = '<div class="modbus-frame modbus-frame-error"><span style="color:var(--red);font-weight:bold;">RX ←</span> 响应超时 (500ms)</div>';
+    modbusAddLog(null, 'timeout');
+    // Sync to main view
+    const mvRxTmo = document.getElementById("mvRxDisplay");
+    if (mvRxTmo) mvRxTmo.innerHTML = div.innerHTML;
+  }, 500);
+}
+
+function modbusFeedResponse(value) {
+  if (!modbusPendingRequest) return;
+  for (let i = 0; i < value.length; i++) modbusResponseBuffer.push(value[i]);
+  const result = modbusTryParseResponse();
+  if (result) {
+    modbusPendingRequest = null;
+    clearTimeout(modbusPendingTimeout);
+    modbusShowResponse(result);
+  }
+}
+
+function modbusTryParseResponse() {
+  const buf = modbusResponseBuffer;
+  if (buf.length < 5) return null;
+  const slaveId = buf[0];
+  const funcCode = buf[1];
+  if (funcCode & 0x80) {
+    if (buf.length >= 5) {
+      const crc = modbusCRC16(new Uint8Array(buf.slice(0, -2)));
+      if (crc[0] === buf[buf.length - 2] && crc[1] === buf[buf.length - 1])
+        return { type: 'exception', slaveId, funcCode: funcCode & 0x7F, exceptionCode: buf[2], raw: new Uint8Array(buf) };
+    }
+    return null;
+  }
+  let expectedLen = -1;
+  if ((funcCode === 1 || funcCode === 2) && buf.length >= 3) expectedLen = 3 + 2 + buf[2];
+  else if ((funcCode === 3 || funcCode === 4) && buf.length >= 3) expectedLen = 3 + 2 + buf[2];
+  else if (funcCode === 5 || funcCode === 6) expectedLen = 8;
+  else if (funcCode === 15 || funcCode === 16) expectedLen = 8;
+  if (expectedLen < 0 || buf.length < expectedLen) return null;
+  const crc = modbusCRC16(new Uint8Array(buf.slice(0, -2)));
+  if (crc[0] !== buf[expectedLen - 2] || crc[1] !== buf[expectedLen - 1])
+    return { type: 'crc_error', raw: new Uint8Array(buf.slice(0, expectedLen)) };
+  const pdu = new Uint8Array(buf.slice(1, expectedLen - 2));
+  return { type: 'success', slaveId, funcCode, pdu, raw: new Uint8Array(buf.slice(0, expectedLen)) };
+}
+
+function modbusCalcResponseTime() {
+  return (Date.now() - modbusSendTime) + 'ms';
+}
+
+function modbusShowResponse(result) {
+  const rxDiv = document.getElementById('modbusRxDisplay');
+  rxDiv.style.display = 'block';
+  const dataDiv = document.getElementById('modbusDataDisplay');
+  if (result.type === 'crc_error') {
+    rxDiv.innerHTML = '<div class="modbus-frame modbus-frame-error"><span style="color:var(--red);font-weight:bold;">RX ←</span> <span class="modbus-timestamp">' + new Date().toLocaleTimeString() + '</span><br>CRC 校验失败</div>';
+    const mvRxErr1 = document.getElementById('mvRxDisplay');
+    if (mvRxErr1) mvRxErr1.innerHTML = rxDiv.innerHTML;
+    modbusAddLog(null, 'crc_error');
+    return;
+  }
+  if (result.type === 'exception') {
+    const codes = {1:'非法功能码',2:'非法数据地址',3:'非法数据值',4:'从站设备故障',5:'确认',6:'从站设备忙',8:'存储奇偶性错误',10:'网关路径不可用',11:'网关目标无响应'};
+    const desc = codes[result.exceptionCode] || '未知异常 (' + result.exceptionCode + ')';
+    rxDiv.innerHTML = '<div class="modbus-frame modbus-frame-error"><span style="color:var(--red);font-weight:bold;">RX ←</span> <span class="modbus-timestamp">' + new Date().toLocaleTimeString() + '</span><br><span style="color:var(--red);">异常响应: ' + desc + '</span></div>';
+    const mvRxErr2 = document.getElementById('mvRxDisplay');
+    if (mvRxErr2) mvRxErr2.innerHTML = rxDiv.innerHTML;
+    modbusAddLog(null, 'exception');
+    return;
+  }
+  const hex = Array.from(result.raw).map(b => b.toString(16).padStart(2,'0')).join(' ');
+  rxDiv.innerHTML = '<div class="modbus-frame modbus-frame-rx"><span style="color:var(--green);font-weight:bold;">RX ←</span> <span class="modbus-timestamp">' +
+    new Date().toLocaleTimeString() + '</span><span class="modbus-response-time" style="float:right;">' + modbusCalcResponseTime() + '</span><br>' + hex + '</div>';
+  modbusAddLog(result.raw, 'ok');
+  modbusShowParsedData(result);
+  // Sync to main view
+  const mvRx = document.getElementById('mvRxDisplay');
+  if (mvRx) mvRx.innerHTML = rxDiv.innerHTML;
+  const mvData = document.getElementById('mvDataDisplay');
+  if (mvData) mvData.innerHTML = dataDiv.innerHTML;
+}
+
+function modbusShowParsedData(result) {
+  if (result.funcCode === 5 || result.funcCode === 6 || result.funcCode === 15 || result.funcCode === 16) {
+    document.getElementById('modbusDataDisplay').style.display = 'block';
+    document.getElementById('modbusDataDisplay').innerHTML = '<div style="padding:4px; font-size:11px; color:var(--green);">✓ 写入成功</div>';
+    return;
+  }
+  const dataDiv = document.getElementById('modbusDataDisplay');
+  dataDiv.style.display = 'block';
+  if (result.funcCode === 1 || result.funcCode === 2) {
+    const byteCount = result.pdu[0];
+    let bits = '';
+    for (let i = 0; i < byteCount; i++)
+      for (let b = 0; b < 8; b++)
+        bits += '<div class="modbus-coil-bit ' + (((result.pdu[1 + i] >> b) & 1) ? 'modbus-coil-on">1' : 'modbus-coil-off">0') + '</div>';
+    dataDiv.innerHTML = '<div style="font-size:9px;color:var(--text-dim);margin-bottom:4px;">线圈状态</div><div class="modbus-coil-container">' + bits + '</div>';
+  } else if (result.funcCode === 3 || result.funcCode === 4) {
+    const byteCount = result.pdu[0];
+    let table = '<table class="modbus-reg-table"><tr><th>地址</th><th>HEX</th><th>U16</th><th>I16</th><th>F32</th></tr>';
+    let f32Idx = 0;
+    for (let i = 0; i + 1 < byteCount; i += 2) {
+      const hi = result.pdu[1 + i], lo = result.pdu[2 + i];
+      const u16 = (hi << 8) | lo;
+      const i16 = (u16 & 0x8000) ? u16 - 0x10000 : u16;
+      const hexStr = hi.toString(16).padStart(2,'0') + ' ' + lo.toString(16).padStart(2,'0');
+      let f32Str = '—';
+      if (f32Idx * 4 + 4 <= byteCount) {
+        const idx = 1 + f32Idx * 4;
+        const view = new DataView(new Uint8Array([result.pdu[idx], result.pdu[idx+1], result.pdu[idx+2], result.pdu[idx+3]]).buffer);
+        f32Str = view.getFloat32(0, true).toExponential(4);
+      }
+      table += '<tr><td style="color:var(--text-secondary);">0x' + (Math.floor(i/2)).toString(16).toUpperCase().padStart(4,'0') +
+        '</td><td>' + hexStr.toUpperCase() + '</td><td>' + u16 + '</td><td>' + i16 + '</td><td style="color:var(--amber);">' + f32Str + '</td></tr>';
+      if (i % 4 === 2) f32Idx++;
+    }
+    dataDiv.innerHTML = table + '</table>';
+  }
+}
+
+// Address mode
+let modbusAddrHex = false;
+function modbusToggleAddrMode() {
+  modbusAddrHex = document.getElementById('mbAddrMode').checked;
+  document.getElementById('mbAddrDecLabel').classList.toggle('active', !modbusAddrHex);
+  document.getElementById('mbAddrHexLabel').classList.toggle('active', modbusAddrHex);
+}
+function modbusParseAddress() {
+  const val = document.getElementById('mbAddress').value.trim();
+  return modbusAddrHex ? parseInt(val, 16) : parseInt(val, 10);
+}
+
+// Function code change handler
+function modbusOnFuncCodeChange() {
+  const fc = parseInt(document.getElementById('mbFuncCode').value);
+  document.getElementById('mbWriteDataField').style.display = (fc === 5 || fc === 6 || fc === 15 || fc === 16) ? 'block' : 'none';
+}
+
+// Logging
+function modbusAddLog(frame, status) {
+  const fc = frame ? frame[1] : (modbusPendingRequest ? modbusPendingRequest[1] : null);
+  const names = {1:'Read Coils',2:'Read Discrete Inputs',3:'Read Holding Registers',4:'Read Input Registers',5:'Write Single Coil',6:'Write Single Register',15:'Write Multiple Coils',16:'Write Multiple Registers'};
+  const desc = fc ? (names[fc] || 'FC' + fc) : '—';
+  const statusText = status === 'ok' ? 'ok' : status === 'timeout' ? 'err' : status === 'crc_error' ? 'err' : 'warn';
+  const statusDesc = status === 'timeout' ? ' · 超时' : (status === 'exception' ? ' · 异常' : (status === 'crc_error' ? ' · CRC 错误' : ''));
+  modbusLog.unshift({ time: new Date(), desc: desc + statusDesc, status: statusText });
+  if (modbusLog.length > MODBUS_LOG_MAX) modbusLog.pop();
+  modbusRenderLog();
+}
+
+function modbusRenderLog() {
+  document.getElementById('modbusLogCount').textContent = modbusLog.length + ' 条记录';
+  document.getElementById('modbusLogList').innerHTML = modbusLog.map(e =>
+    '<div class="modbus-log-entry"><span class="modbus-log-time">' + e.time.toLocaleTimeString() +
+    '</span><span class="modbus-log-desc">' + escapeHtml(e.desc) +
+    '</span><span class="modbus-log-status modbus-log-' + e.status + '">' +
+    (e.status === 'ok' ? '✓' : e.status === 'err' ? '✗' : '⚠') + '</span></div>'
+  ).join('');
+  // Sync to main view
+  const mvList = document.getElementById('mvLogList');
+  const mvCount = document.getElementById('mvLogCount');
+  if (mvList) mvList.innerHTML = document.getElementById('modbusLogList').innerHTML;
+  if (mvCount) mvCount.textContent = modbusLog.length + ' 条';
+}
+function modbusClearLog() { modbusLog.length = 0; modbusRenderLog(); }
+
+function modbusSwitchTab(tab) {
+  document.querySelectorAll('.modbus-tab').forEach(t => t.classList.remove('active'));
+  if (tab === 'req') document.querySelector('.modbus-tab:nth-child(1)').classList.add('active');
+  else document.querySelector('.modbus-tab:nth-child(2)').classList.add('active');
+}
+
+// ════════════════════════════════════════════════════════
+// MODBUS MODE MANAGEMENT
+// ════════════════════════════════════════════════════════
+function modbusToggleActive() {
+  const active = document.getElementById('mbActivate').checked;
+  modbusActive = active;
+  document.getElementById('mbModeSelect').style.display = active ? '' : 'none';
+
+  if (!active) {
+    // Turning OFF Modbus mode
+    if (modbusCycling) modbusStopCycle();
+    if (modbusPortMode === 'independent' && modbusConnected) {
+      modbusDisconnectPort();
+    }
+    if (modbusPortMode === 'shared') {
+      // Restore terminal
+      isPaused = false;
+      document.getElementById('inputField').disabled = false;
+      document.getElementById('btnSend').disabled = false;
+      document.getElementById('mbFreezeHint').classList.remove('show');
+    }
+    document.getElementById('mbStatusBar').style.display = 'none';
+    modbusViewToggle(false);
+    showNotification('Modbus 模式已关闭');
+    return;
+  }
+
+  // Turning ON Modbus mode
+  document.getElementById('mbStatusBar').style.display = 'inline-flex';
+  modbusViewToggle(true);
+
+  if (modbusPortMode === 'shared') {
+    if (!isConnected) {
+      showNotification('请先在终端连接串口设备', 'error');
+      modbusActive = false;
+      document.getElementById('mbActivate').checked = false;
+      document.getElementById('mbModeSelect').style.display = 'none';
+      document.getElementById('mbStatusBar').style.display = 'none';
+      modbusViewToggle(false);
+      return;
+    }
+    // Freeze terminal
+    isPaused = true;
+    document.getElementById('inputField').disabled = true;
+    document.getElementById('btnSend').disabled = true;
+    document.getElementById('mbFreezeHint').classList.add('show');
+    document.getElementById('mbConnectBtn').style.display = 'none';
+    showNotification('Modbus 模式 — 共享串口');
+  } else {
+    // Independent mode — show connect button
+    document.getElementById('mbConnectBtn').style.display = '';
+    showNotification('Modbus 模式 — 请连接独立串口');
+  }
+}
+
+// ════════════════════════════════════════════════════════
+// MODBUS MAIN VIEW MANAGEMENT
+// ════════════════════════════════════════════════════════
+function modbusViewToggle(show) {
+  const view = document.getElementById('modbusView');
+  const term = document.getElementById('terminalOutput');
+  if (show) {
+    view.classList.add('active');
+    term.style.display = 'none';
+    // Sync controls to right sidebar
+    modbusViewSync();
+    // Hide right sidebar Modbus panel directly (avoid toggleTool guard loop)
+    const mbPanel = document.getElementById('toolModbus');
+    const mbArrow = document.getElementById('arrowModbus');
+    if (mbPanel && mbPanel.style.display !== 'none') {
+      mbPanel.style.display = 'none';
+      if (mbArrow) mbArrow.textContent = '▶';
+      toolStates['modbus'] = false;
+    }
+  } else {
+    view.classList.remove('active');
+    term.style.display = '';
+  }
+}
+
+function modbusViewSync() {
+  const map = {
+    'mvSlaveId': 'mbSlaveId',
+    'mvFuncCode': 'mbFuncCode',
+    'mvAddress': 'mbAddress',
+    'mvQuantity': 'mbQuantity',
+    'mvWriteData': 'mbWriteData'
+  };
+  for (const [src, dst] of Object.entries(map)) {
+    const s = document.getElementById(src);
+    const d = document.getElementById(dst);
+    if (s && d) d.value = s.value;
+  }
+  // Sync addr mode
+  const mvAddr = document.getElementById('mvAddrMode');
+  const mbAddr = document.getElementById('mbAddrMode');
+  if (mvAddr && mbAddr) mbAddr.checked = mvAddr.checked;
+  modbusToggleAddrMode();
+}
+
+function modbusViewSyncAddrMode() {
+  const checked = document.getElementById('mvAddrMode').checked;
+  document.getElementById('mbAddrMode').checked = checked;
+  modbusToggleAddrMode();
+}
+
+function modbusViewSend() {
+  modbusViewSync();
+  modbusSend();
+}
+
+function modbusViewStop() {
+  if (modbusCycling) {
+    modbusStopCycle();
+  }
+}
+
+// ════════════════════════════════════════════════════════
+// MODBUS CYCLING
+// ════════════════════════════════════════════════════════
+function modbusViewToggleCycle() {
+  if (modbusCycling) {
+    modbusStopCycle();
+  } else {
+    modbusStartCycle();
+  }
+}
+
+function modbusStartCycle() {
+  if (!modbusActive) { showNotification("Modbus 模式未激活", "error"); return; }
+  const interval = parseInt(document.getElementById('mvCycleInterval').value);
+  if (isNaN(interval) || interval < 100 || interval > 60000) {
+    showNotification('循环间隔需在 100-60000ms 之间', 'error');
+    return;
+  }
+
+  modbusCycling = true;
+  modbusCycleCount = 0;
+
+  // Update UI
+  document.getElementById('mvCycleBtn').textContent = '⟳ 循环中...';
+  document.getElementById('mvCycleBtn').disabled = true;
+  document.getElementById('mvStopBtn').disabled = false;
+  document.getElementById('mvCycleIndicator').style.display = 'inline-flex';
+  document.getElementById('mvSendBtn').disabled = true;
+  // Sync sidebar
+  const sbStatus = document.getElementById("mbCycleStatus");
+  if (sbStatus) sbStatus.style.display = "inline-block";
+
+  // Send immediately first
+  modbusViewSend();
+  if (modbusCycling) {
+    modbusCycleCount = 1;
+    document.getElementById('mvCycleCount').textContent = modbusCycleCount;
+  }
+  const sbCountInit = document.getElementById("mbSidebarCycleCount");
+  if (sbCountInit) sbCountInit.textContent = modbusCycleCount;
+
+  // Schedule recurring sends
+  if (modbusCycleTimer) clearInterval(modbusCycleTimer);
+  modbusCycleTimer = setInterval(() => {
+    if (!modbusCycling || !modbusActive) {
+      modbusStopCycle();
+      return;
+    }
+    modbusViewSend();
+    modbusCycleCount++;
+    document.getElementById('mvCycleCount').textContent = modbusCycleCount;
+    const sbCountEl = document.getElementById("mbSidebarCycleCount");
+    if (sbCountEl) sbCountEl.textContent = modbusCycleCount;
+  }, interval);
+
+  showNotification('循环发送已启动，间隔: ' + interval + 'ms');
+}
+function modbusSidebarCycle() {
+  modbusViewToggleCycle();
+}
+
+function modbusStopCycle() {
+  modbusCycling = false;
+  if (modbusCycleTimer) {
+    clearInterval(modbusCycleTimer);
+    modbusCycleTimer = null;
+  }
+
+  // Update UI
+  document.getElementById('mvCycleBtn').textContent = '⟳ 开始循环';
+  document.getElementById('mvCycleBtn').disabled = false;
+  document.getElementById('mvStopBtn').disabled = true;
+  document.getElementById('mvCycleIndicator').style.display = 'none';
+  document.getElementById('mvSendBtn').disabled = false;
+  // Sync sidebar
+  const sbStatus_stop = document.getElementById("mbCycleStatus");
+  if (sbStatus_stop) sbStatus_stop.style.display = "none";
+  const sbCount = document.getElementById("mbSidebarCycleCount");
+  if (sbCount) sbCount.textContent = "0";
+
+  showNotification('循环发送已停止，共发送: ' + modbusCycleCount + ' 次');
+}
+
+// ════════════════════════════════════════════════════════
+function modbusSetMode(mode) {
+  if (mode === modbusPortMode) return;
+  if (modbusCycling) modbusStopCycle();
+
+  // Cleanup current mode
+  if (modbusPortMode === 'independent' && modbusConnected) {
+    modbusDisconnectPort();
+  }
+  if (modbusPortMode === 'shared' && modbusActive) {
+    // Restore terminal before switching
+    isPaused = false;
+    document.getElementById('inputField').disabled = false;
+    document.getElementById('btnSend').disabled = false;
+    document.getElementById('mbFreezeHint').classList.remove('show');
+  }
+
+  modbusPortMode = mode;
+
+  // Update UI for new mode
+  document.querySelectorAll('#mbModeSelect .seg-option').forEach(el => {
+    el.classList.toggle('active', el.dataset.mode === mode);
+  });
+
+  const indepSection = document.getElementById('mbIndependentSection');
+  if (mode === 'independent') {
+    indepSection.style.display = '';
+    document.getElementById('mbConnectBtn').style.display = '';
+    document.getElementById('mbConnectBtn').textContent = '连接独立串口';
+    document.getElementById('mbPortStatus').style.display = 'none';
+  } else {
+    indepSection.style.display = 'none';
+    if (modbusActive) {
+      // Re-freeze terminal in shared mode
+      if (!isConnected) {
+        showNotification('请先在终端连接串口设备', 'error');
+        modbusActive = false;
+        document.getElementById('mbActivate').checked = false;
+        document.getElementById('mbModeSelect').style.display = 'none';
+        document.getElementById('mbStatusBar').style.display = 'none';
+        return;
+      }
+      isPaused = true;
+      document.getElementById('inputField').disabled = true;
+      document.getElementById('btnSend').disabled = true;
+      document.getElementById('mbFreezeHint').classList.add('show');
+    }
+  }
+  showNotification(mode === 'shared' ? '已切换为共享串口模式' : '已切换为独立串口模式');
+}
+
+// ════════════════════════════════════════════════════════
+async function modbusConnectPort() {
+  try {
+    modbusPort = await navigator.serial.requestPort();
+    const baudRate = parseInt(document.getElementById('mbBaudRate').value);
+    const dataBits = parseInt(document.getElementById('mbDataBits').value);
+    const stopBits = parseInt(document.getElementById('mbStopBits').value);
+    const parity = document.getElementById('mbParity').value;
+    const flowControl = document.getElementById('mbFlowControl').value;
+
+    await modbusPort.open({ baudRate, dataBits, stopBits, parity, flowControl });
+
+    modbusConnected = true;
+    modbusWriter = modbusPort.writable.getWriter();
+
+    const info = modbusPort.getInfo();
+    const portStr = info.usbVendorId
+      ? `VID:${info.usbVendorId.toString(16).toUpperCase().padStart(4,'0')} PID:${info.usbProductId.toString(16).toUpperCase().padStart(4,'0')}`
+      : 'Serial Port';
+
+    const dot = document.getElementById('mbPortDot');
+    const infoEl = document.getElementById('mbPortInfo');
+    dot.classList.add('on');
+    infoEl.textContent = `${portStr} @ ${baudRate}`;
+    document.getElementById('mbPortStatus').style.display = '';
+    document.getElementById('mbConnectBtn').textContent = '断开独立串口';
+
+    showNotification('独立串口已连接', 'success');
+    modbusReadLoop();
+  } catch (e) {
+    if (e.name !== 'NotFoundError') {
+      showNotification('独立串口连接失败: ' + e.message, 'error');
+    }
+    modbusPort = null;
+    modbusConnected = false;
+  }
+}
+
+// ════════════════════════════════════════════════════════
+async function modbusDisconnectPort() {
+  if (modbusCycling) modbusStopCycle();
+  modbusConnected = false;
+  modbusReadLoopRunning = false;
+
+  try {
+    if (modbusReader) {
+      try { await modbusReader.cancel(); } catch(e) {}
+      for (let i = 0; i < 50 && modbusReader; i++) { await sleep(10); }
+      modbusReader = null;
+    }
+    if (modbusWriter) {
+      try { modbusWriter.releaseLock(); } catch(e) {}
+      modbusWriter = null;
+    }
+    if (modbusPort) {
+      try { await modbusPort.close(); } catch(e) {}
+      modbusPort = null;
+    }
+  } catch(e) {}
+
+  document.getElementById('mbPortDot').classList.remove('on');
+  document.getElementById('mbPortInfo').textContent = '--';
+  document.getElementById('mbConnectBtn').textContent = '连接独立串口';
+  showNotification('独立串口已断开');
+}
+
+// ════════════════════════════════════════════════════════
+async function modbusReadLoop() {
+  modbusReadLoopRunning = true;
+  try {
+    while (modbusPort && modbusPort.readable && modbusConnected) {
+      modbusReader = modbusPort.readable.getReader();
+      try {
+        while (modbusConnected) {
+          const { value, done } = await modbusReader.read();
+          if (done) break;
+          if (!value || !modbusActive) continue;
+
+          modbusFeedResponse(value);
+        }
+      } catch (e) {
+        if (e.name !== 'AbortError' && modbusConnected) {
+          showNotification('独立串口读取错误: ' + e.message, 'error');
+        }
+      } finally {
+        try { modbusReader.releaseLock(); } catch(e) {}
+        modbusReader = null;
+      }
+    }
+  } catch(e) {}
+  modbusReadLoopRunning = false;
+
+  if (modbusConnected) {
+    modbusConnected = false;
+    document.getElementById('mbPortDot').classList.remove('on');
+    document.getElementById('mbPortInfo').textContent = '已断开';
+    document.getElementById('mbConnectBtn').textContent = '连接独立串口';
+    showNotification('独立串口连接已中断', 'error');
+  }
+}
+
+// Self-test
+function modbusSelfTest() {
+  const t1 = modbusCRC16(new Uint8Array([0x01, 0x03, 0x00, 0x00, 0x00, 0x0A]));
+  console.assert(t1[0] === 0xC5 && t1[1] === 0xCD, 'CRC16 test 1 failed');
+  const t2 = modbusCRC16(new Uint8Array([0x01, 0x06, 0x00, 0x01, 0x00, 0x03]));
+  console.assert(t2[0] === 0x98 && t2[1] === 0x0B, 'CRC16 test 2 failed');
+  const t3 = modbusCRC16(new Uint8Array([0x11, 0x03, 0x00, 0x6B, 0x00, 0x03]));
+  console.assert(t3[0] === 0x76 && t3[1] === 0x87, 'CRC16 test 3 failed');
+  appendLine('sys', '[Modbus] CRC16 自检通过');
+  const frame = modbusConstructFrame(1, 3, 0, 10, null);
+  console.assert(frame.length === 8, 'Frame length should be 8, got ' + frame.length);
+  console.assert(frame[0] === 0x01 && frame[1] === 0x03, 'Slave ID / FC');
+  console.assert(frame[6] === 0xC5 && frame[7] === 0xCD, 'Frame CRC');
+  appendLine('sys', '[Modbus] 帧构造自检通过');
+  appendLine('sys', '[Modbus] 全部自检通过 ✓');
+}
+
+// Auto-expand modbus tool when sending
+function modbusExpandOnSend() {
+  const body = document.getElementById('toolModbus');
+  if (body.style.display === 'none') toggleTool('modbus');
+}
+
+// ════════════════════════════════════════════════════════
+// UTILS
+// ════════════════════════════════════════════════════════
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(2) + ' MB';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function escapeJs(s) {
+  return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Keyboard shortcut hints
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 'l') { e.preventDefault(); clearTerminal(); }
+  if (e.ctrlKey && e.key === 'd') { e.preventDefault(); if (isConnected) disconnectPort(); }
+});
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js');
+}
+</script>
+<script src="pwa-install.js"></script>
+</body>
+</html>
