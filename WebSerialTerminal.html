@@ -3148,7 +3148,11 @@ async function sendCtrlC() {
     txBytes += bytes.length;
     updateCounters();
     if (document.getElementById('chkLocalEcho').checked) {
-      appendLine('tx', '^C');
+      // HEX 输入模式下 TX 回显为十六进制字节,与 sendData 一致;文本模式按终端惯例显示 ^C
+      const displayText = document.getElementById('chkHexInput').checked
+        ? Array.from(bytes).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
+        : '^C';
+      appendLine('tx', displayText);
     }
   } catch (e) {
     errors++;
@@ -4563,6 +4567,9 @@ if ('serviceWorker' in navigator) {
       if (!newWorker) return;
       newWorker.addEventListener('statechange', function() {
         if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+          // 去重:重复部署时 updatefound 可能再次触发,避免追加多个同 id toast
+          var oldToast = document.getElementById('sw-update-toast');
+          if (oldToast) oldToast.remove();
           var toast = document.createElement('div');
           toast.id = 'sw-update-toast';
           toast.style.cssText = 'position:fixed;bottom:16px;right:16px;background:#1a1a2e;color:#0f0;border:1px solid #0f0;padding:12px 20px;border-radius:8px;z-index:99999;font-family:monospace;box-shadow:0 0 20px rgba(0,255,0,.3);';
@@ -4575,6 +4582,9 @@ if ('serviceWorker' in navigator) {
         }
       });
     });
+  }).catch(function(e) {
+    // SW 注册失败(如非安全上下文/离线):显式记录,避免 unhandled rejection
+    console.warn('[SW] 注册失败:', e);
   });
 }
 </script>
