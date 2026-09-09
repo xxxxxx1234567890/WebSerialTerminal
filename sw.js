@@ -1,4 +1,4 @@
-const CACHE = 'webterm-v1';
+const CACHE = 'webterm-v3';
 const URLS = [
   '/',
   '/manifest.json',
@@ -20,6 +20,12 @@ self.addEventListener('activate', e => {
       Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
     ).then(() => self.clients.claim())
   );
+});
+
+self.addEventListener('message', e => {
+  if (e.data.action === 'skipWaiting') {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener('fetch', e => {

@@ -629,6 +629,20 @@
     padding: 0;
   }
 
+  #btnBreak {
+    flex-shrink: 0;
+    height: 40px;
+    border-radius: 3px;
+    justify-content: center;
+    align-items: center;
+    display: flex;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    gap: 4px;
+    white-space: nowrap;
+    padding: 0 10px;
+  }
+
   .input-prompt {
     font-family: var(--font-mono);
     font-size: 14px;
@@ -1581,7 +1595,7 @@
     </div>
     <div>
       <div class="logo-text">WEBTERM PRO</div>
-      <div class="logo-sub">Serial Debug Terminal v2.1</div>
+      <div class="logo-sub">Serial Debug Terminal v2.2</div>
     </div>
   </div>
 
@@ -2071,6 +2085,8 @@
             oninput="handleInputChange(event)"
             autocomplete="off" spellcheck="false">
         </div><button class="btn primary" onclick="sendInput()" id="btnSend" type="button">发送</button>
+        <button class="btn danger" onclick="sendCtrlC()" id="btnBreak" type="button"
+          title="发送中断信号 Ctrl+C (0x03) — 或在输入框无选中文本时按 Ctrl+C">⏹ Ctrl+C</button>
       </div>
       <div class="input-options">
         <label class="checkbox-label">
@@ -2328,7 +2344,7 @@ document.addEventListener('DOMContentLoaded', () => {
 function printWelcome() {
   const lines = [
     { type: 'sys', text: '╔══════════════════════════════════════════════════════╗' },
-    { type: 'sys', text: '║         WEBTERM PRO — 网页串口调试终端 v2.1          ║' },
+    { type: 'sys', text: '║         WEBTERM PRO — 网页串口调试终端 v2.2          ║' },
     { type: 'sys', text: '║    Powered by Web Serial API  |  Single HTML File     ║' },
     { type: 'sys', text: '╚══════════════════════════════════════════════════════╝' },
     { type: 'sys', text: '' },
@@ -3119,6 +3135,28 @@ function sendInput() {
   document.getElementById('historyDropdown').classList.remove('open');
 }
 
+async function sendCtrlC() {
+  if (!isConnected || !writer) {
+    if (!isConnected) showNotification('请先连接串口设备', 'error');
+    else if (!writer) showNotification('发送器未就绪，请重新连接', 'error');
+    return;
+  }
+  try {
+    // 发送单个原始字节 0x03(不追加 EOL,与 HEX/文本模式无关)
+    const bytes = new Uint8Array([0x03]);
+    await writer.write(bytes);
+    txBytes += bytes.length;
+    updateCounters();
+    if (document.getElementById('chkLocalEcho').checked) {
+      appendLine('tx', '^C');
+    }
+  } catch (e) {
+    errors++;
+    appendLine('err', `✖ 发送 Ctrl+C 失败: ${e.message}`);
+    showNotification(e.message, 'error');
+  }
+}
+
 async function sendFile() {
   document.getElementById('fileInput').click();
 }
@@ -3445,6 +3483,7 @@ function updateUI(connected, portInfoStr, baudRate, dataBits, parity, stopBits) 
     document.getElementById('btnConnect').disabled = true;
     document.getElementById('btnDisconnect').disabled = false;
     document.getElementById('btnSend').disabled = false;
+    document.getElementById('btnBreak').disabled = false;
   } else {
     connDot.classList.remove('connected');
     connText.textContent = '未连接';
@@ -3458,6 +3497,7 @@ function updateUI(connected, portInfoStr, baudRate, dataBits, parity, stopBits) 
     document.getElementById('btnConnect').disabled = false;
     document.getElementById('btnDisconnect').disabled = true;
     document.getElementById('btnSend').disabled = false;
+    document.getElementById('btnBreak').disabled = false;
   }
 }
 
@@ -3503,6 +3543,11 @@ function handleInputKey(e) {
     document.getElementById('historyDropdown').classList.remove('open');
   } else if (e.key === 'Escape') {
     document.getElementById('historyDropdown').classList.remove('open');
+  } else if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.code === 'KeyC') {
+    // 仅纯 Ctrl+C(排除 Ctrl+Shift+C 等误发);无选中文本 → 发送中断 0x03,有选中 → 保留浏览器复制
+    if (field.selectionStart !== field.selectionEnd) return;
+    e.preventDefault();
+    sendCtrlC();
   } else if (e.ctrlKey && e.key === 'l') {
     e.preventDefault();
     clearTerminal();
@@ -4125,6 +4170,7 @@ function modbusToggleActive() {
       isPaused = false;
       document.getElementById('inputField').disabled = false;
       document.getElementById('btnSend').disabled = false;
+      document.getElementById('btnBreak').disabled = false;
       document.getElementById('mbFreezeHint').classList.remove('show');
     }
     document.getElementById('mbStatusBar').style.display = 'none';
@@ -4151,6 +4197,7 @@ function modbusToggleActive() {
     isPaused = true;
     document.getElementById('inputField').disabled = true;
     document.getElementById('btnSend').disabled = true;
+    document.getElementById('btnBreak').disabled = true;
     document.getElementById('mbFreezeHint').classList.add('show');
     document.getElementById('mbConnectBtn').style.display = 'none';
     showNotification('Modbus 模式 — 共享串口');
@@ -4320,6 +4367,7 @@ function modbusSetMode(mode) {
     isPaused = false;
     document.getElementById('inputField').disabled = false;
     document.getElementById('btnSend').disabled = false;
+    document.getElementById('btnBreak').disabled = false;
     document.getElementById('mbFreezeHint').classList.remove('show');
   }
 
@@ -4351,6 +4399,7 @@ function modbusSetMode(mode) {
       isPaused = true;
       document.getElementById('inputField').disabled = true;
       document.getElementById('btnSend').disabled = true;
+      document.getElementById('btnBreak').disabled = true;
       document.getElementById('mbFreezeHint').classList.add('show');
     }
   }
@@ -4508,7 +4557,25 @@ document.addEventListener('keydown', (e) => {
 </script>
 <script>
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js');
+  navigator.serviceWorker.register('/sw.js').then(function(reg) {
+    reg.addEventListener('updatefound', function() {
+      var newWorker = reg.installing;
+      if (!newWorker) return;
+      newWorker.addEventListener('statechange', function() {
+        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+          var toast = document.createElement('div');
+          toast.id = 'sw-update-toast';
+          toast.style.cssText = 'position:fixed;bottom:16px;right:16px;background:#1a1a2e;color:#0f0;border:1px solid #0f0;padding:12px 20px;border-radius:8px;z-index:99999;font-family:monospace;box-shadow:0 0 20px rgba(0,255,0,.3);';
+          toast.innerHTML = '🔄 检测到新版本 <button id="sw-refresh" style="margin-left:12px;padding:4px 12px;background:#0f0;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">立即刷新</button>';
+          document.body.appendChild(toast);
+          document.getElementById('sw-refresh').onclick = function() {
+            newWorker.postMessage({ action: 'skipWaiting' });
+            window.location.reload();
+          };
+        }
+      });
+    });
+  });
 }
 </script>
 <script src="pwa-install.js"></script>
