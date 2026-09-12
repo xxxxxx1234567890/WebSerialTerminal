@@ -1,4 +1,4 @@
-const CACHE = 'webterm-v3';
+const CACHE = 'webterm-v4';
 const URLS = [
   '/',
   '/manifest.json',

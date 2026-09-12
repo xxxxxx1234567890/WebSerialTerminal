@@ -897,6 +897,19 @@
 
   .form-control:focus { border-color: var(--accent); }
 
+  .form-hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin-top: 6px;
+  }
+
+  .form-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
   .modal-footer {
     display: flex;
     justify-content: flex-end;
@@ -1595,7 +1608,7 @@
     </div>
     <div>
       <div class="logo-text">WEBTERM PRO</div>
-      <div class="logo-sub">Serial Debug Terminal v2.2</div>
+      <div class="logo-sub">Serial Debug Terminal v2.3</div>
     </div>
   </div>
 
@@ -2115,7 +2128,7 @@
           RS485 模式
         </label>
         <label class="checkbox-label">
-          <input type="checkbox" id="chkLocalEcho">
+          <input type="checkbox" id="chkLocalEcho" checked>
           <div class="custom-checkbox"></div>
           本地回显
         </label>
@@ -2243,6 +2256,16 @@
         <label class="form-label">缓冲区大小 (字节)</label>
         <input type="number" class="form-control" id="bufSize" value="65536" min="1024" max="1048576">
       </div>
+      <div class="form-group">
+        <label class="form-label">日志保存目录</label>
+        <input type="text" class="form-control" id="logDir"
+          placeholder="如 D:\SerialLogs" title="本地服务的写盘目录（绝对路径）">
+        <div class="form-hint" id="logDirStatus"></div>
+        <div class="form-row">
+          <button class="btn" onclick="pickLogDirectory()">选择目录…</button>
+          <button class="btn" onclick="resetLogDirectory()">恢复默认</button>
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeSettings()">取消</button>
@@ -2292,7 +2315,10 @@ let settings = {
   fontSize: 14,
   colorTheme: 'green',
   maxLines: 2000,
-  bufSize: 65536
+  bufSize: 65536,
+  // 服务端日志保存目录（绝对路径）。留空则跳过服务端这一级，
+  // 依次尝试浏览器目录句柄、下载文件夹兜底。
+  logDir: ''
 };
 
 // ════════════════════════════════════════════════════════
@@ -2344,7 +2370,7 @@ document.addEventListener('DOMContentLoaded', () => {
 function printWelcome() {
   const lines = [
     { type: 'sys', text: '╔══════════════════════════════════════════════════════╗' },
-    { type: 'sys', text: '║         WEBTERM PRO — 网页串口调试终端 v2.2          ║' },
+    { type: 'sys', text: '║         WEBTERM PRO — 网页串口调试终端 v2.3          ║' },
     { type: 'sys', text: '║    Powered by Web Serial API  |  Single HTML File     ║' },
     { type: 'sys', text: '╚══════════════════════════════════════════════════════╝' },
     { type: 'sys', text: '' },
@@ -2994,6 +3020,10 @@ async function disconnectPort() {
 
 async function readLoop() {
   readLoopRunning = true;
+  // 单个流式解码器贯穿整个读取循环：UTF-8 多字节字符若被串口分包切开，
+  // { stream: true } 会把不完整的半个字符留在解码器内部，等下一块到达自动续接。
+  // （若每个数据块都新建 TextDecoder，被切开的汉字会解成 U+FFFD 替换符"�"）
+  const rxDecoder = new TextDecoder('utf-8', { fatal: false });
   try {
     while (port && port.readable && isConnected) {
       reader = port.readable.getReader();
@@ -3007,18 +3037,25 @@ async function readLoop() {
           rxBytesLastSec += value.length;
           updateCounters();
 
-          if (isPaused) continue;
+          // 解码器持有的是"字节流"，下面两条分支都会让字节流断开，
+          // 断开处必须先 flush 丢弃残留的半字符，否则它会与恢复后的字节
+          // 拼成一个凭空出现的 U+FFFD 替换符。
+          if (isPaused) {
+            rxDecoder.decode();
+            continue;
+          }
 
           const chkHexVal = document.getElementById('chkHex').checked;
 
           if (chkHexVal) {
+            rxDecoder.decode();
             // Hex display — show hex + ASCII side by side
             const hexStr = Array.from(value).map(b => b.toString(16).toUpperCase().padStart(2,'0')).join(' ');
             const asciiStr = Array.from(value).map(b => (b >= 32 && b < 127) ? String.fromCharCode(b) : '.').join('');
             appendLine('rx', `${hexStr}  │  ${asciiStr}`);
           } else {
             // ASCII display — buffer and split on newlines
-            const text = new TextDecoder('utf-8', { fatal: false }).decode(value);
+            const text = rxDecoder.decode(value, { stream: true });
             rxBuffer += text;
             let nl;
             while ((nl = rxBuffer.indexOf('\n')) !== -1) {
@@ -3133,6 +3170,8 @@ function sendInput() {
   sendData(val);
   field.value = '';
   document.getElementById('historyDropdown').classList.remove('open');
+  saveState();       // 历史立即落盘，跨会话/跨窗口（PWA）可见
+  field.focus();     // 焦点回到输入框，发送后可立即按 ↑ 翻历史
 }
 
 async function sendCtrlC() {
@@ -3147,13 +3186,14 @@ async function sendCtrlC() {
     await writer.write(bytes);
     txBytes += bytes.length;
     updateCounters();
-    if (document.getElementById('chkLocalEcho').checked) {
-      // HEX 输入模式下 TX 回显为十六进制字节,与 sendData 一致;文本模式按终端惯例显示 ^C
-      const displayText = document.getElementById('chkHexInput').checked
-        ? Array.from(bytes).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
-        : '^C';
-      appendLine('tx', displayText);
+    // 先刷出尚未成行的 RX 残段,让中断后的输出从新行开始
+    if (rxBuffer.length > 0) {
+      appendLine('rx', rxBuffer);
+      rxBuffer = '';
     }
+    // 中断反馈始终显示并另起一行(与本地回显是否勾选无关);HEX 输入模式显示为字节 03
+    const displayText = document.getElementById('chkHexInput').checked ? '03' : '^C';
+    appendLine('tx', displayText);
   } catch (e) {
     errors++;
     appendLine('err', `✖ 发送 Ctrl+C 失败: ${e.message}`);
@@ -3563,15 +3603,22 @@ function handleInputKey(e) {
 
 function handleInputChange(e) {
   const val = e.target.value;
+  // 手动编辑后重置历史游标：再按 ↑ 从最新一条重新开始
+  historyIndex = -1;
   const dropdown = document.getElementById('historyDropdown');
   if (!val) { dropdown.classList.remove('open'); return; }
 
   const matches = inputHistory.filter(h => h.toLowerCase().includes(val.toLowerCase()));
   if (!matches.length) { dropdown.classList.remove('open'); return; }
 
-  dropdown.innerHTML = matches.slice(0, 8).map(m =>
-    `<div class="history-item" onclick="selectHistory('${m.replace(/'/g, "\\'")}')">${escapeHtml(m)}</div>`
-  ).join('');
+  dropdown.innerHTML = '';
+  matches.slice(0, 8).forEach(m => {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.textContent = m;                    // 文本走 textContent，天然免疫
+    item.addEventListener('click', () => selectHistory(m));
+    dropdown.appendChild(item);
+  });
   dropdown.classList.add('open');
 }
 
@@ -3590,20 +3637,43 @@ function addMacro() {
   saveState();
 }
 
+// 宏列表构件：一律用 DOM API 构造，避免把宏内容拼进 HTML 属性
+function makeMacroInput(cls, placeholder, title, value, onCommit) {
+  const el = document.createElement('input');
+  el.type = 'text';
+  el.className = cls;
+  el.placeholder = placeholder;
+  el.title = title;
+  el.value = value;
+  el.addEventListener('change', () => onCommit(el.value));
+  return el;
+}
+
+function makeMacroButton(cls, title, text, onClick) {
+  const el = document.createElement('button');
+  el.className = cls;
+  el.title = title;
+  el.textContent = text;
+  el.addEventListener('click', onClick);
+  return el;
+}
+
 function renderMacros() {
   const list = document.getElementById('macroList');
   list.innerHTML = '';
   macros.forEach((m, i) => {
     const div = document.createElement('div');
     div.className = 'macro-item';
-    div.innerHTML = `
-      <input type="text" class="macro-label-input" placeholder="标签" value="${escapeHtml(m.label)}"
-        onchange="macros[${i}].label = this.value; saveState()" title="指令标签">
-      <input type="text" class="macro-cmd-input" placeholder="命令内容" value="${escapeHtml(m.cmd)}"
-        onchange="macros[${i}].cmd = this.value; saveState()" title="发送内容">
-      <button class="btn macro-send" onclick="sendData('${escapeJs(m.cmd)}')" title="发送">▶</button>
-      <button class="btn macro-del" onclick="macros.splice(${i},1); renderMacros(); saveState()" title="删除">✕</button>
-    `;
+    div.append(
+      makeMacroInput('macro-label-input', '标签', '指令标签', m.label,
+        v => { macros[i].label = v; saveState(); }),
+      makeMacroInput('macro-cmd-input', '命令内容', '发送内容', m.cmd,
+        v => { macros[i].cmd = v; saveState(); }),
+      // 点击时才读取 m.cmd，而不是渲染时把内容烘进属性
+      makeMacroButton('btn macro-send', '发送', '▶', () => sendData(m.cmd)),
+      makeMacroButton('btn macro-del', '删除', '✕',
+        () => { macros.splice(i, 1); renderMacros(); saveState(); })
+    );
     list.appendChild(div);
   });
 }
@@ -3611,23 +3681,214 @@ function renderMacros() {
 // ════════════════════════════════════════════════════════
 // SAVE LOG
 // ════════════════════════════════════════════════════════
-function saveLog() {
+// click() 触发的下载是异步的，blob URL 需延后回收，否则与下载读取产生竞态
+const BLOB_URL_REVOKE_DELAY_MS = 1000;
+
+// 本地写盘接口。自定义请求头是关键鉴权：跨站 fetch 携带自定义头会触发 CORS
+// 预检，而 server.js 从不批准预检，别的网页因此无法调用写盘接口。
+const SAVE_LOG_ENDPOINT = '/api/save-log';
+const SAVE_LOG_HEADER = 'X-WebTerm';
+
+// 本地服务响应超时：超过即降级，避免整条保存链被一个挂起的请求卡死
+const SAVE_LOG_TIMEOUT_MS = 3000;
+
+// 浏览器目录句柄的 IndexedDB 存储位置
+const LOG_DIR_DB = 'wtp_fs';
+const LOG_DIR_STORE = 'handles';
+const LOG_DIR_KEY = 'logDirHandle';
+
+// ── IndexedDB 工具（仅用于持久化目录句柄）──────────────
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(LOG_DIR_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(LOG_DIR_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbRun(mode, fn) {
+  const db = await idbOpen();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(LOG_DIR_STORE, mode);
+      const req = fn(tx.objectStore(LOG_DIR_STORE));
+      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+const getLogDirHandle = () => idbRun('readonly', s => s.get(LOG_DIR_KEY));
+const setLogDirHandle = h => idbRun('readwrite', s => s.put(h, LOG_DIR_KEY));
+const delLogDirHandle = () => idbRun('readwrite', s => s.delete(LOG_DIR_KEY));
+
+// ── 目录设置 UI ────────────────────────────────────────
+async function refreshLogDirStatus() {
+  const el = document.getElementById('logDirStatus');
+  if (!el) return;
+  const parts = [];
+  if (settings.logDir) parts.push('本地服务 → ' + settings.logDir);
+  let handle = null;
+  let idbFailed = false;
+  try { handle = await getLogDirHandle(); } catch (e) { idbFailed = true; }
+  if (handle) parts.push('浏览器目录 → ' + handle.name);
+  if (idbFailed) {
+    el.textContent = '当前：浏览器目录状态读取失败（IndexedDB 不可用）';
+    return;
+  }
+  el.textContent = parts.length
+    ? '当前：' + parts.join('　|　')
+    : '当前：未配置，日志将保存到浏览器下载文件夹';
+}
+
+async function pickLogDirectory() {
+  if (!window.showDirectoryPicker) {
+    showNotification('当前浏览器不支持目录选择，请改用 Chrome / Edge', 'error');
+    return;
+  }
+  try {
+    const handle = await showDirectoryPicker({ mode: 'readwrite' });
+    await setLogDirHandle(handle);
+    await refreshLogDirStatus();
+    showNotification('已记住目录: ' + handle.name, 'success');
+  } catch (e) {
+    if (e && e.name !== 'AbortError') showNotification('选择目录失败: ' + e.message, 'error');
+  }
+}
+
+async function resetLogDirectory() {
+  settings.logDir = '';
+  const input = document.getElementById('logDir');
+  if (input) input.value = '';
+  // 删除失败必须让用户知道：句柄若还在 IndexedDB 里，
+  // saveViaDirectory 仍会命中它并写入用户以为已经放弃的旧目录。
+  let cleared = true;
+  try {
+    await delLogDirHandle();
+  } catch (e) {
+    cleared = false;
+  }
+  saveState();
+  await refreshLogDirStatus();
+  if (cleared) {
+    showNotification('已恢复默认保存位置');
+  } else {
+    showNotification('目录设置已清空，但浏览器目录句柄清除失败，仍可能写入原目录', 'error');
+  }
+}
+
+// ── 日志内容组装：BOM 在此统一前置，三条路径共用 ────────
+function buildLogPayload() {
   const output = document.getElementById('terminalOutput');
   const lines = Array.from(output.querySelectorAll('.terminal-line')).map(l => {
     const time = l.querySelector('.line-time')?.textContent || '';
     const dir = l.querySelector('.line-dir')?.textContent || '';
     const content = l.querySelector('.line-content')?.textContent || '';
-    return `${time} ${dir} ${content}`;
+    return time + ' ' + dir + ' ' + content;
   }).join('\n');
 
-  const blob = new Blob([lines], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
+  return {
+    // 前置 UTF-8 BOM：Windows 记事本 / Excel 对无 BOM 的 UTF-8 会走
+    // 启发式猜测，猜成 GBK 即整个文件乱码；带 BOM 可强制其按 UTF-8 解析。
+    content: '\uFEFF' + lines,
+    filename: 'serial_log_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.txt'
+  };
+}
+
+// ── 一级：本地服务静默写盘 ─────────────────────────────
+// reasons 收集降级原因，由链尾统一播报，避免"失败→成功"两条自相矛盾的提示
+async function saveViaServer(content, filename, reasons) {
+  if (!settings.logDir) return false; // 未配置目录则不尝试，直接降级
+
+  // 必须带超时：服务端若接受连接却不响应，await 会一直挂起，
+  // 整条降级链都走不到下载兜底，用户点了保存毫无反应。
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SAVE_LOG_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(SAVE_LOG_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', [SAVE_LOG_HEADER]: '1' },
+      body: JSON.stringify({ dir: settings.logDir, filename: filename, content: content }),
+      signal: controller.signal
+    });
+  } catch (e) {
+    reasons.push(e.name === 'AbortError'
+      ? '本地服务响应超时'
+      : '本地服务不可达（若为直接打开 HTML，属正常）');
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+  if (res.status === 404) { reasons.push('服务端版本过旧，无保存接口'); return false; }
+
+  let info = {};
+  try { info = await res.json(); } catch (e) { /* 响应体非 JSON，忽略 */ }
+
+  if (!res.ok) {
+    reasons.push('服务端拒绝：' + (info.error || res.status));
+    return false;
+  }
+  showNotification('日志已保存: ' + (info.path || filename), 'success');
+  return true;
+}
+
+// ── 二级：浏览器目录句柄写入 ───────────────────────────
+async function saveViaDirectory(content, filename, reasons) {
+  let handle;
+  try {
+    handle = await getLogDirHandle();
+  } catch (e) {
+    reasons.push('浏览器目录句柄读取失败');
+    return false;
+  }
+  if (!handle) return false; // 从未选择过目录，属正常降级而非错误
+
+  try {
+    // 页面重载后句柄仍在，但授权会退回 prompt，需重新申请。
+    // saveLog 由按钮点击触发，此处仍在用户手势有效期内，可以弹授权。
+    if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
+      if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') {
+        reasons.push('浏览器目录未获授权');
+        return false;
+      }
+    }
+    const fileHandle = await handle.getFileHandle(filename, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+    await writable.close();
+    showNotification('日志已保存: ' + handle.name + ' / ' + filename, 'success');
+    return true;
+  } catch (e) {
+    reasons.push('目录写入失败：' + e.message);
+    return false;
+  }
+}
+
+// ── 三级：下载文件夹兜底 ───────────────────────────────
+function saveViaDownload(content, filename, reasons) {
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
   const a = document.createElement('a');
   a.href = url;
-  a.download = `serial_log_${new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)}.txt`;
+  a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
-  showNotification('日志已保存');
+  setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_REVOKE_DELAY_MS);
+  showNotification(reasons.length
+    ? '已保存到下载文件夹（' + reasons.join('；') + '）'
+    : '日志已保存到下载文件夹');
+}
+
+// ── 入口：三级降级 ─────────────────────────────────────
+async function saveLog() {
+  const payload = buildLogPayload();
+  const reasons = [];
+  if (await saveViaServer(payload.content, payload.filename, reasons)) return;
+  if (await saveViaDirectory(payload.content, payload.filename, reasons)) return;
+  saveViaDownload(payload.content, payload.filename, reasons);
 }
 
 // ════════════════════════════════════════════════════════
@@ -3638,6 +3899,8 @@ function openSettings() {
   document.getElementById('colorTheme').value = settings.colorTheme;
   document.getElementById('maxLines').value = settings.maxLines;
   document.getElementById('bufSize').value = settings.bufSize;
+  document.getElementById('logDir').value = settings.logDir;
+  refreshLogDirStatus();
   document.getElementById('settingsModal').classList.add('open');
 }
 
@@ -3649,6 +3912,7 @@ function applySettings() {
   settings.fontSize = parseInt(document.getElementById('fontSize').value);
   settings.colorTheme = document.getElementById('colorTheme').value;
   settings.maxLines = parseInt(document.getElementById('maxLines').value);
+  settings.logDir = document.getElementById('logDir').value.trim();
 
   // ── 字体大小 ──
   document.getElementById('terminalOutput').style.fontSize = settings.fontSize + 'px';
@@ -3820,7 +4084,7 @@ function saveState() {
   try {
     localStorage.setItem('wtp_macros', JSON.stringify(macros));
     localStorage.setItem('wtp_settings', JSON.stringify(settings));
-    localStorage.setItem('wtp_history', JSON.stringify(inputHistory.slice(0, 50)));
+    localStorage.setItem('wtp_history', JSON.stringify(inputHistory.slice(0, 100)));
     localStorage.setItem('wtp_baud', document.getElementById('baudRate').value);
   } catch(e) {}
 }
@@ -4545,10 +4809,6 @@ function formatBytes(b) {
 
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function escapeJs(s) {
-  return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
