@@ -20,14 +20,16 @@ catch {
 }
 
 # Generate start.vbs
-$vbsContent = 'CreateObject("WScript.Shell").Run "node ""' + $installDir + 'server.js""", 0, False'
-Set-Content -Path ($installDir + 'start.vbs') -Value $vbsContent -Encoding ASCII
+$serverPath = Join-Path $installDir 'server.js'
+$vbsPath = Join-Path $installDir 'start.vbs'
+$vbsContent = 'CreateObject("WScript.Shell").Run "node ""' + $serverPath + '""", 0, False'
+Set-Content -Path $vbsPath -Value $vbsContent -Encoding ASCII
 Write-Host "[OK]  start.vbs generated" -ForegroundColor Green
 
 # Add to registry autostart
-$regPath = "HKCU:SoftwareMicrosoftWindowsCurrentVersionRun"
+$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 try {
-    Set-ItemProperty -Path $regPath -Name "WebTermPro" -Value ('wscript.exe "' + $installDir + 'start.vbs"') -Type String -ErrorAction Stop
+    Set-ItemProperty -Path $regPath -Name "WebTermPro" -Value ('wscript.exe "' + $vbsPath + '"') -Type String -ErrorAction Stop
     Write-Host "[OK]  Auto-start added" -ForegroundColor Green
 }
 catch {
