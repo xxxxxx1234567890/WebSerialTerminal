@@ -124,11 +124,12 @@ token 的具体约定（消除实现歧义）：
 
 | 项 | 约定 |
 |---|---|
-| 路径 | `path.join(os.homedir(), '.webterm', 'bridge-token')`。**放在仓库之外**，避免误提交；目录以 `0o700` 创建，文件以 `0o600` 写入 |
+| 路径 | `path.join(baseDir, '.webterm', 'bridge-token')`，其中 `baseDir` 默认 `os.homedir()`。**放在仓库之外**，避免误提交；目录以 `0o700` 创建，文件以 `0o600` 写入 |
+| 可测试性覆盖 | 环境变量 `WEBTERM_HOME` 可覆盖 `baseDir`。测试据此写入临时目录，**不污染真实用户目录**。这是测试 seam 而非安全缺口——能设置环境变量者本就已控制该进程 |
 | 生命周期 | 每次 `server.js` 启动**重新生成**，不持久化——token 是会话级的，重启即失效 |
-| 内容 | 32 字节随机数的 hex（`crypto.randomBytes(32).toString('hex')`） |
+| 内容 | 32 字节随机数的 hex（`crypto.randomBytes(32).toString('hex')`，即 64 字符） |
 | 启动顺序 | `mcp-server.js` 启动时若文件不存在或读取失败，**立即报错退出**并提示"请先启动 server.js（`npm start`）"。不静默重试——静默重试会让 AI 看到一个永远连不上的工具，比直接报错更难排查 |
-| 比较 | 用 `crypto.timingSafeEqual` 比较，避免时序侧信道 |
+| 比较 | 用 `crypto.timingSafeEqual` 比较；**长度不等时先返回 false**（`timingSafeEqual` 对不等长输入会抛异常，必须先挡） |
 
 > Windows 无 POSIX 权限位，`0o600` 由 Node 尽力而为；实际依赖用户目录 ACL（其他用户默认不可读）。这是可接受的务实取舍——攻击者若已能以本用户身份读写用户目录，token 已不是主要短板。
 
@@ -286,13 +287,21 @@ class FakeSerialPort {
 }
 ```
 
-原因：现有代码**依赖真实流的精确语义**——
+原因：现有代码**依赖真实流的精确语义**。以下已在 Node v24 实测确认（原生 `ReadableStream` / `WritableStream`）：
 
-- `disconnectPort()`（2979）依赖 `reader.cancel()` 使 `readLoop` 中 `await reader.read()` **抛 `AbortError`**，随后 `finally` 执行 `releaseLock()`，再轮询等待锁释放（2997 的 `for (let i = 0; i < 50; i++)`）
-- 若假流不抛 `AbortError`，`disconnectPort` 会白等 500ms 或更糟——`close()` 时锁未释放而抛异常
-- `getReader()` 在流已锁定时必须抛 `TypeError`
+| 场景 | 实测结果 |
+|---|---|
+| `getReader()` 对已锁定流二次调用 | `TypeError: ReadableStream is locked` |
+| `reader.cancel()` 时存在待决 `read()` | **resolve `{done: true}`** |
+| `controller.close()` 时存在待决 `read()` | resolve `{done: true}` |
+| `getWriter()` 对已锁定流二次调用 | `TypeError: WritableStream is locked` |
+| `releaseLock()` 后再 `getWriter()` | 正常可用 |
 
-手写 shim 几乎必然遗漏这些边界，后果是**测试全绿但真机挂掉**。使用原生流则这些语义"构造正确"，而非"猜测正确"。
+**重要纠正**：`WebSerialTerminal.html:2992-2993` 的注释称 `reader.cancel()` 会让待决 `read()` **抛 `AbortError`**——该说法与原生流实测语义**不符**，原生行为是 resolve `{done: true}`。
+
+现有 `readLoop`（3031-3035）两条路径都处理了（`if (done) break;` 与 `catch`），因此**代码本身正确**，注释不准确而已。但假串口的测试断言必须对准**实测语义**（`{done: true}`），不能对准注释。
+
+手写 shim 的风险正在于此：若待决 `read()` 既不 resolve 也不 reject，`disconnectPort()` 会白等满 500ms 轮询（2997 的 `for (let i = 0; i < 50; i++)`），随后对着**仍然锁定的**流调用 `getReader()` 而抛异常。使用原生流则这些语义"构造正确"，而非"猜测正确"。
 
 ### 5.4 假设备能力（对应 `dev` 域）
 
@@ -433,7 +442,7 @@ MCP 工具结果是文本，AI 读的是句子而非 JSON：
 
 | 层 | 内容 | 需要真人？ | 进 CI？ |
 |---|---|---|---|
-| 1. 单元（`node:test`，零依赖） | `bridge.js` 的 Origin/token 校验、路由、限流、超时清理、帧上限；假串口的 `AbortError` / 锁定 / 背压语义 | 否 | ✅ |
+| 1. 单元（`node:test`，零依赖） | `bridge.js` 的 Origin/token 校验、路由、限流、超时清理、帧上限；假串口的流语义（`cancel`/`close` 均 resolve `{done:true}`、锁定抛 `TypeError`、背压） | 否 | ✅ |
 | 2. 结构断言（延续 `test/client.test.js` 风格） | seam 回归测试、`serialProvider` 只声明一次、桥代码不进主脚本 | 否 | ✅ |
 | 3. 集成 | 起 `server.js` + Node 假页面（WS 客户端），跑完整往返、鉴权拒绝、超时 | 否 | ✅ |
 | 4. 端到端 | 真人开 Chrome → `dev_serial` 切假设备 → AI 驱动"连接 → 发 Modbus 请求 → 断言响应"闭环 | **是**（仅需开页面） | ❌ |
@@ -472,7 +481,7 @@ test('串口端口只能经 serialProvider 获取', () => {
 |---|---|---|
 | 首次授权需真人 | `requestPort()` 需用户手势（1.2） | 设计已接纳；AI 收到 `NEEDS_USER_GESTURE` 即引导用户 |
 | `getPorts()` 免手势未实测 | 结论来自 MDN 规范 + StackOverflow 实证，**未在本机实测**（搜索结果中部分中文资料说法相反） | 不影响可行性（9.3 的退路只降体验）；实现时优先实测验证 |
-| 假串口语义偏差 | 手写 shim 会致测试假通过（5.3） | 强制使用原生流；单元测试直接覆盖 `AbortError` / 锁定语义 |
+| 假串口语义偏差 | 手写 shim 会致测试假通过（5.3） | 强制使用原生流；单元测试按**实测语义**断言（`cancel`/`close` → `{done:true}`、锁定 → `TypeError`），不按现有注释断言 |
 | 武装开关被长期打开 | 用户可能开着不关，等于无护栏 | 审计日志兜底（可追溯）；开关状态在 UI 上常驻可见 |
 | 触及现有工作代码 | 需改 `connectPort` / `modbusConnectPort` 取端口的方式 | 改动仅 2 行；由 9.1 回归测试 + 现有 `test/client.test.js` 锁定行为 |
 | `server.js` 职责变杂 | 静态服务 + save-log + AI 桥 | 逻辑全部放 `bridge.js`，`server.js` 只增加挂载与 upgrade 路由 |
