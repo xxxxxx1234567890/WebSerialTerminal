@@ -57,7 +57,7 @@ isValidEnvelope(msg)             // → boolean
 baseDir(env = process.env)     // env.WEBTERM_HOME || os.homedir()
 tokenPath(dir = baseDir())     // → <dir>/.webterm/bridge-token
 generateToken()                // → 64 字符 hex
-writeToken(dir = baseDir())    // → { token, path }；目录 0o700、文件 0o600
+writeToken(dir = baseDir())    // → { token, filePath }；目录 0o700、文件 0o600
 readToken(dir = baseDir())     // → string；缺失时抛中文 Error
 tokenEquals(a, b)              // → boolean；长度不等先返回 false
 ```
@@ -156,7 +156,8 @@ test('encodeToBytes 支持三种编码且往返一致', () => {
 test('ascii 编码走 UTF-8，中文不丢字节', () => {
   const bytes = P.encodeToBytes('温度:25.6℃', 'ascii');
   assert.strictEqual(P.bytesToEncoding(bytes, 'ascii'), '温度:25.6℃');
-  assert.strictEqual(bytes.length, 13); // 中文 3 字节 ×3 + ':' 1 + '25.6' 4 + '℃' 3
+  // 温 3 + 度 3 + ':' 1 + '25.6' 4 + '℃'(U+2103) 3 = 14
+  assert.strictEqual(bytes.length, 14);
 });
 
 test('未知编码抛错', () => {
@@ -1145,8 +1146,12 @@ test('速率限制：超过窗口配额时拒绝而非静默排队', async () =>
     send(adapter, P.makeReq(`r-40${i}`, 'serial', 'status', {}));
   }
   for (let i = 0; i < 3; i++) results.push(await nextMessage(adapter));
+  // 限流复用 INVALID_ARGS 而非新增 RATE_LIMITED：spec 第 4.5 节的错误码是固定的
+  // 9 项清单，T1 的测试逐项断言了该清单，新增码会破坏它。
+  // 面向模型的可读提示由 message 承担（"请求过于频繁（上限 N 次 / M ms）"）。
   const codes = results.filter(r => !r.ok).map(r => r.error.code);
-  assert.deepStrictEqual(codes, ['INVALID_ARGS'], '第 3 个请求应被限流拒绝（复用 INVALID_ARGS 之外的专用码）');
+  assert.deepStrictEqual(codes, ['INVALID_ARGS'],
+    '第 3 个请求应被限流拒绝（码复用 INVALID_ARGS，理由见上）');
 
   page.close(); adapter.close(); await limited.teardown();
 });
@@ -1388,8 +1393,9 @@ git commit -m "feat: 桥的请求路由、超时与限流"
 
 ```js
 test('启动时写入桥 token，供 mcp-server.js 读取', async () => {
-  // before() 已用 WEBTERM_HOME 指向临时目录启动服务
-  const tokenFile = path.join(process.env.WEBTERM_HOME, '.webterm', 'bridge-token');
+  // 用 tmpHome 而不是 process.env.WEBTERM_HOME：后者只设在了子进程的 env 里，
+  // 测试进程自身的 env 并没有这个变量
+  const tokenFile = path.join(tmpHome, '.webterm', 'bridge-token');
   assert.ok(fs.existsSync(tokenFile), '应写入 ' + tokenFile);
   assert.match(fs.readFileSync(tokenFile, 'utf8'), /^[0-9a-f]{64}$/);
 });
@@ -2752,7 +2758,7 @@ Expected: FAIL — `M.handleMessage is not a function`
 
 - [ ] **Step 3: 实现（stdio 主循环）**
 
-在 `mcp-server.js` 末尾追加：
+在 `mcp-server.js` 末尾追加以下内容，**并把 Task 9 结尾那一行 `module.exports = { buildTools, dispatchTool, translateError, TOOL_MAP };` 替换掉**（下面这行是它的超集）——同一个文件里留两条 `module.exports` 会让后来者误判哪条生效：
 
 ```js
 // ════ 与桥的连接 ════
@@ -2990,7 +2996,7 @@ Expected 逐项确认：
 1. 关闭开关后调 `serial.send` → 必须返回 `NOT_ARMED`，且设备**没有**收到数据（用串口助手确认）
 2. 打开开关后调 `serial.send` → 成功，设备收到数据
 3. 首次 `serial.connect`：若浏览器无已授权端口 → 应返回 `NEEDS_USER_GESTURE`；手动点一次页面"连接"后重试 → 成功
-4. `ui.watch` 类操作：`ui.inspect` 应返回真实的渲染行与颜色
+4. `ui.inspect` 应返回真实的渲染行与颜色（这是验证 ANSI 解析与高亮的手段）
 
 - [ ] **Step 4: 验证桥挂掉不影响终端**
 
