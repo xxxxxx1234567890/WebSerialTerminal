@@ -33,8 +33,13 @@
   /** 容忍 '0103'、'01 03'、'0x01,0x03'、'01:03' 四种写法 */
   function hexToBytes(s) {
     if (typeof s !== 'string') throw new Error('hex 必须是字符串');
-    const cleaned = s.replace(/0x/gi, '').replace(/[\s,:]/g, '');
-    if (cleaned === '') throw new Error('hex 不能为空');
+    // 只剥每个 token 的前导 0x。全局剥离会把 '0102030x' 吃成 '010203'，
+    // 于是畸形输入被静默重解释成别的字节发到线缆上，而不是干净地报错。
+    const tokens = s.split(/[\s,:]+/).filter(t => t !== '');
+    if (tokens.length === 0) throw new Error('hex 不能为空');
+    const parts = tokens.map(t => t.replace(/^0x/i, ''));
+    if (parts.includes('')) throw new Error('hex 含非法字符（0x 前缀后缺数字）');
+    const cleaned = parts.join('');
     if (cleaned.length % 2 !== 0) throw new Error('hex 长度必须是偶数（每字节两位）');
     if (!/^[0-9a-fA-F]+$/.test(cleaned)) throw new Error('hex 含非法字符');
     const out = new Uint8Array(cleaned.length / 2);

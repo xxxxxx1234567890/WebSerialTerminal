@@ -86,3 +86,15 @@ test('信封构造器与校验', () => {
     assert.strictEqual(P.isValidEnvelope(bad), false, JSON.stringify(bad));
   }
 });
+
+test('hexToBytes 只剥每个 token 的前导 0x，别处的 0x 一律拒绝', () => {
+  // 未锚定的剥离会把它们吃成合法 hex，静默发出与请求不同的字节
+  assert.throws(() => P.hexToBytes('0102030x'), /非法/);
+  assert.throws(() => P.hexToBytes('a0xb'), /非法/);
+  assert.throws(() => P.hexToBytes('0x0x01'), /非法/);
+  assert.throws(() => P.hexToBytes('01 0x'), /非法/);   // 悬空的 0x 前缀
+
+  // 每个 token 各自的前导 0x 仍受支持（含大写 0X）
+  assert.deepStrictEqual([...P.hexToBytes('0x01 0x03 0x00 0xAB')], [0x01, 0x03, 0x00, 0xAB]);
+  assert.deepStrictEqual([...P.hexToBytes('0X01:0x03')], [0x01, 0x03]);
+});
