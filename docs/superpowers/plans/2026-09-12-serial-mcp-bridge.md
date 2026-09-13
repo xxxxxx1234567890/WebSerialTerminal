@@ -661,10 +661,13 @@ Expected: FAIL — `Cannot find module '../fake-serial.js'`
 // （cancel 与 close 均使待决 read() resolve {done:true}；对已锁定流 getReader 抛 TypeError）。
 // 手写 Promise shim 会漏掉这些边界，后果是测试全绿但真机挂掉。
 (function (root, factory) {
-  const api = factory();
+  // factory 必须收到 root：函数表达式闭包的是它被【书写处】的外层作用域，
+  // 而非 IIFE 的形参。写成 function () 却在体内引用 root 会在浏览器分支直接
+  // ReferenceError，而 Node 分支走 require 根本不碰 root —— 测试会全绿掩盖它。
+  const api = factory(root);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FakeSerial = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
   'use strict';
 
   const { hexToBytes } = (typeof module === 'object' && module.exports)
@@ -768,8 +771,8 @@ Expected: FAIL — `Cannot find module '../fake-serial.js'`
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `node --test test/fake-serial.test.js`
-Expected: PASS（全部 15 个 test）
+Run: `node --test --test-timeout=15000 test/fake-serial.test.js`
+Expected: PASS（16 个 test）
 
 - [ ] **Step 5: 提交**
 
@@ -1587,11 +1590,22 @@ let serialProvider = window.realSerialProvider;
     modbusPort = await serialProvider.requestPort();
 ```
 
-在文件末尾的 `<script src="pwa-install.js"></script>`（`4851`）之后新增：
+在文件末尾的 `<script src="pwa-install.js"></script>`（`4851`）之后新增**三个**标签，**顺序不可颠倒**：
 
 ```html
+<script src="bridge-protocol.js"></script>
+<script src="fake-serial.js"></script>
 <script src="bridge-client.js"></script>
 ```
+
+**顺序是硬要求，不是风格问题：**
+
+- 三者都是 UMD，浏览器分支各自挂 `globalThis.BridgeProtocol` / `globalThis.FakeSerial` 全局
+- `fake-serial.js` 在加载时就会解构 `root.BridgeProtocol.hexToBytes`——**单独加载它会直接 `TypeError: Cannot destructure property 'hexToBytes' of … undefined`**
+- `bridge-client.js` 在加载时读取 `root.BridgeProtocol` 与 `root.FakeSerial` 两个全局
+- 三者都必须排在主 `<script>` 块（`2280-4821`）**之后**：经典脚本按文档顺序执行，而 `bridge-client.js` 要读主脚本写在 `window.realSerialProvider` 上的东西
+
+漏掉前两个标签，浏览器里整个桥客户端会静默失效——而所有 Node 侧测试照样全绿。
 
 - [ ] **Step 4: 运行测试确认通过**
 
