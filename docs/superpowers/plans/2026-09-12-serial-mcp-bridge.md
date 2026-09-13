@@ -1897,7 +1897,14 @@ Expected: FAIL — `Cannot find module '../bridge-client.js'`
     // requestPort() 每次弹框且需用户手势，getPorts() 两者都不需要——所以 AI 的自动重连
     // 必须绕开 requestPort()，做法是在自己的调用期间临时替换 serialProvider。
     async function withAuthorizedPort(index, fn) {
-      const authorized = await serialProvider.getPorts();
+      let authorized;
+      try {
+        authorized = await serialProvider.getPorts();
+      } catch (e) {
+        // getPorts() 本身会 reject（权限被撤销等），必须转成可操作提示而不是裸抛
+        throw err(P.ERROR_CODES.NEEDS_USER_GESTURE,
+          '无法查询已授权端口（' + ((e && e.message) || e) + '）。请手动点击一次页面上的"连接"按钮。');
+      }
       if (!authorized || authorized.length === 0) {
         throw err(P.ERROR_CODES.NEEDS_USER_GESTURE,
           '没有已授权端口。浏览器要求用户手势才能弹出串口选择框，请手动点击一次页面上的"连接"按钮。');
@@ -1907,6 +1914,14 @@ Expected: FAIL — `Cannot find module '../bridge-client.js'`
         throw err(P.ERROR_CODES.INVALID_ARGS,
           `index 越界：已授权端口 ${authorized.length} 个，请求的 index=${idx}`);
       }
+
+      // 【关键】当前 provider 已不是真实实现时（典型是 dev.serial_source 切到了 fake）
+      // 绝不能替换：换成 navigator.serial 会绕开假设备，之后 connect 永远连不上，
+      // 而注入/截获工具仍"看起来正常"——这种半坏状态比直接报错难查得多。
+      // 按【身份】判断而非按 state.serialSource 判断，这样任何非真实 provider 都被覆盖。
+      // （对照实验：漏掉此守卫会让"切到 fake → serial.connect"整条流程断掉，冒烟从 38/38 掉到 27/38）
+      if (serialProvider !== root.realSerialProvider) return await fn();
+
       const prev = serialProvider;
       serialProvider = {
         getPorts: () => navigator.serial.getPorts(),
