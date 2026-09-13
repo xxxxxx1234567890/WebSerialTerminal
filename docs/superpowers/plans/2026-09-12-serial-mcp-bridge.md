@@ -1126,8 +1126,15 @@ test('页面未连接时立即返回 PAGE_NOT_CONNECTED', async () => {
   adapter.close();
 });
 
-test('页面不响应时超时返回 BRIDGE_TIMEOUT 并清理请求表', async () => {
-  const slow = attachBridgeOnNewServer({ timeoutMs: 80 });
+test('页面不响应时超时返回 BRIDGE_TIMEOUT 并清理请求表', async (t) => {
+  // attachBridgeOnNewServer 是 async —— 漏 await 会让 slow 变成 Promise、slow.port 变 undefined，
+  // 报错表现为 "Invalid URL: ws://127.0.0.1:undefined/bridge"
+  const slow = await attachBridgeOnNewServer({ timeoutMs: 80 });
+  // teardown 必须注册到 t.after，不能写在测试体末尾：
+  // 测试超时或中途失败时末尾语句永不执行，server 句柄不释放，进程永不退出——
+  // 而 npm test 不带 --test-timeout，那就是无限挂起
+  t.after(async () => { await slow.teardown(); });
+
   const page = await connectPageTo(slow, { kind: 'hello', role: 'page', pageId: 'p-slow', protocolVersion: 1, capabilities: ['serial'] });
   const adapter = await connectAdapterTo(slow);
 
@@ -1136,11 +1143,13 @@ test('页面不响应时超时返回 BRIDGE_TIMEOUT 并清理请求表', async (
   assert.strictEqual(res.error.code, 'BRIDGE_TIMEOUT');
   assert.strictEqual(slow.bridge.getStats().pending, 0, '超时后必须清理，否则反复超时会吃内存');
 
-  page.close(); adapter.close(); await slow.teardown();
+  page.close(); adapter.close();
 });
 
-test('速率限制：超过窗口配额时拒绝而非静默排队', async () => {
-  const limited = attachBridgeOnNewServer({ rateLimit: { max: 2, windowMs: 10000 } });
+test('速率限制：超过窗口配额时拒绝而非静默排队', async (t) => {
+  const limited = await attachBridgeOnNewServer({ rateLimit: { max: 2, windowMs: 10000 } });
+  t.after(async () => { await limited.teardown(); });
+
   const page = await connectPageTo(limited, { kind: 'hello', role: 'page', pageId: 'p-rate', protocolVersion: 1, capabilities: ['serial'] });
   const adapter = await connectAdapterTo(limited);
 
@@ -1156,7 +1165,7 @@ test('速率限制：超过窗口配额时拒绝而非静默排队', async () =>
   assert.deepStrictEqual(codes, ['INVALID_ARGS'],
     '第 3 个请求应被限流拒绝（码复用 INVALID_ARGS，理由见上）');
 
-  page.close(); adapter.close(); await limited.teardown();
+  page.close(); adapter.close();
 });
 
 test('页面断开时挂起的请求被清理', async () => {
@@ -1174,7 +1183,7 @@ test('页面断开时挂起的请求被清理', async () => {
 });
 ```
 
-同时在该测试文件顶部（`before` 之前）加入三个辅助函数，供多实例测试使用：
+**辅助函数已由 Task 4 加入该文件**（`attachBridgeOnNewServer` / `connectPageTo` / `connectAdapterTo`）——**直接复用，不要重复定义**。重复的 `function` 声明是合法 JS 且后者会静默遮蔽前者，属最难排查的一类缺陷。以下为其**形状**，供对照用法——**文件中已存在，勿复制**（其中 `attachBridgeOnNewServer` 是 `async`，调用处**必须 `await`**）：
 
 ```js
 // 独立实例（自带端口与桥），用于测试超时/限流等需要不同配置的场景
