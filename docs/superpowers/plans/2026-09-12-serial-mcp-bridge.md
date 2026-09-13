@@ -1603,16 +1603,19 @@ Expected: FAIL — 第 2、3 条红了（`serialProvider` 尚不存在）。
 // 串口源。所有端口获取都必须经此——AI 桥的假设备靠重新赋值它来接管（见 bridge-client.js）。
 // 用 let 而非 const：bridge-client.js 需要整体替换。
 // 挂到 window 上是为了让 bridge-client.js（独立 script 块）能引用到真实实现以便切回。
+//
+// 这里【刻意】不加"优先返回已授权端口"的策略——虽然 AI 的自动重连需要它（requestPort()
+// 每次弹框且需用户手势，getPorts() 两者都不需要）。原因：本 seam 服务【两条】路径——
+// 真人点按钮与 AI 调用，而真人点按钮要的恰恰是选择框。若把该策略放这里：
+//   · Modbus「连接独立串口」永远进不去（Chromium 对同一设备缓存同一个 SerialPort 对象，
+//     getPorts()[0] 就是主连接已打开的那个，open() 必抛）
+//   · 已授权多个设备时用户再也选不了别的设备
+//   · 与 connectPort 的 catch 过滤 NotFoundError 叠加后会静默失败，无提示也无处授权
+// 所以维持原样（人工路径 100% 不变），把免手势策略放在 AI 自己的入口——
+// Task 8 的 serial.connect 在自己的调用期间临时替换 serialProvider，用完换回。
 window.realSerialProvider = {
-  getPorts: () => navigator.serial.getPorts(),
-  // 优先返回已授权端口。这一步是整个自动化的关键：
-  // requestPort() 每次都会弹选择框、且必须由用户手势触发；getPorts() 两者都不需要。
-  // 没有这层优先，AI 在真人授权过一次之后依然无法自动重连。
-  requestPort: async () => {
-    const ports = await realSerialProvider.getPorts();
-    if (ports.length) return ports[0];
-    return navigator.serial.requestPort();   // 确实没有已授权端口时才弹框
-  },
+  requestPort: () => navigator.serial.requestPort(),
+  getPorts:    () => navigator.serial.getPorts(),
 };
 let serialProvider = window.realSerialProvider;
 ```
@@ -1886,6 +1889,31 @@ Expected: FAIL — `Cannot find module '../bridge-client.js'`
       }
     }
 
+    // ── 免手势端口获取（**仅供 AI 入口使用**） ──
+    // 人工路径不得使用本函数：那两个按钮要的就是选择框。详见 WebSerialTerminal.html
+    // 里 seam 块上方的说明（为什么策略不能放进 seam 本身）。
+    // requestPort() 每次弹框且需用户手势，getPorts() 两者都不需要——所以 AI 的自动重连
+    // 必须绕开 requestPort()，做法是在自己的调用期间临时替换 serialProvider。
+    async function withAuthorizedPort(index, fn) {
+      const authorized = await serialProvider.getPorts();
+      if (!authorized || authorized.length === 0) {
+        throw err(P.ERROR_CODES.NEEDS_USER_GESTURE,
+          '没有已授权端口。浏览器要求用户手势才能弹出串口选择框，请手动点击一次页面上的"连接"按钮。');
+      }
+      const idx = Number.isInteger(index) ? index : 0;
+      if (idx < 0 || idx >= authorized.length) {
+        throw err(P.ERROR_CODES.INVALID_ARGS,
+          `index 越界：已授权端口 ${authorized.length} 个，请求的 index=${idx}`);
+      }
+      const prev = serialProvider;
+      serialProvider = {
+        getPorts: () => navigator.serial.getPorts(),
+        requestPort: async () => (await navigator.serial.getPorts())[idx],
+      };
+      // finally 换回：任何失败路径都不得把免手势 provider 泄漏给人工路径
+      try { return await fn(); } finally { serialProvider = prev; }
+    }
+
     // ── 命令分派（薄层：只负责"调哪个全局函数"） ──
     const OPS = {
       'serial.status': async () => {
@@ -1924,13 +1952,8 @@ Expected: FAIL — `Cannot find module '../bridge-client.js'`
 
       'serial.connect': async args => {
         if (isConnected) return { alreadyConnected: true };
-        // 优先用已授权端口自动连；无授权端口时 connectPort 会走 requestPort 抛 NotFoundError
-        const authorized = await serialProvider.getPorts();
-        if (!authorized || authorized.length === 0) {
-          throw err(P.ERROR_CODES.NEEDS_USER_GESTURE,
-            '没有已授权端口。浏览器要求用户手势才能弹出串口选择框，请手动点击一次页面的"连接"按钮。');
-        }
-        await connectPort();
+        // 走 withAuthorizedPort：AI 免手势，绝不弹选择框（人工点按钮才弹）
+        await withAuthorizedPort(args && args.index, () => connectPort());
         if (!isConnected) throw err(P.ERROR_CODES.PAGE_ERROR, '连接未成功建立');
         return { connected: true };
       },
@@ -1980,7 +2003,10 @@ Expected: FAIL — `Cannot find module '../bridge-client.js'`
         const action = args && args.action;
         switch (action) {
           case 'set_mode': modbusSetMode(args.mode); break;
-          case 'connect': await modbusConnectPort(); break;
+          // 独立模式连接同样走 withAuthorizedPort：AI 免手势，且可用 index 选第二个
+          // 适配器（Chromium 对同一设备只暴露一个 SerialPort 对象，故 getPorts()[0]
+          // 往往是终端已打开的那个——多适配器场景必须能指定 index）
+          case 'connect': await withAuthorizedPort(args.index, () => modbusConnectPort()); break;
           case 'disconnect': await modbusDisconnectPort(); break;
           case 'activate':
             if (modbusPortMode === 'shared' && !isConnected) {
