@@ -18,13 +18,13 @@ let tmpRoot;
 let tmpHome;
 
 // ── 工具 ────────────────────────────────────────────────
-function request(method, urlPath, { headers = {}, body } = {}) {
+function requestTo(targetPort, method, urlPath, { headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined
       ? undefined
       : (typeof body === 'string' ? body : JSON.stringify(body));
     const req = http.request(
-      { host: '127.0.0.1', port, path: urlPath, method, headers: {
+      { host: '127.0.0.1', port: targetPort, path: urlPath, method, headers: {
           ...(payload !== undefined ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
           ...headers,
         } },
@@ -40,11 +40,35 @@ function request(method, urlPath, { headers = {}, body } = {}) {
   });
 }
 
+// 默认打主服务器；另起的实例用 requestTo
+function request(method, urlPath, opts) {
+  return requestTo(port, method, urlPath, opts);
+}
+
+/** 有界请求：目标进程已死时应当快速失败，而不是让整个套件悬着（npm test 无超时） */
+function requestWithin(targetPort, method, urlPath, opts, timeoutMs = 3000) {
+  return Promise.race([
+    requestTo(targetPort, method, urlPath, opts),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error(`向 :${targetPort} 的请求在 ${timeoutMs}ms 内没有返回`)), timeoutMs).unref()),
+  ]);
+}
+
 // 默认带齐"合法同源请求"的头
 function okHeaders(extra = {}) {
   return {
     'Content-Type': 'application/json',
     'Origin': `http://localhost:${port}`,
+    [TOKEN_HEADER]: '1',
+    ...extra,
+  };
+}
+
+/** 打另起实例时用它：Origin 必须与该实例的端口一致，否则会被判成异源 */
+function okHeadersFor(targetPort, extra = {}) {
+  return {
+    'Content-Type': 'application/json',
+    'Origin': `http://localhost:${targetPort}`,
     [TOKEN_HEADER]: '1',
     ...extra,
   };
@@ -80,6 +104,56 @@ function startServer() {
     });
     child.stderr.on('data', c => (out += c));
     child.on('exit', code => { clearTimeout(timer); reject(new Error('服务器退出 code=' + code + '\n' + out)); });
+  });
+}
+
+/**
+ * 起一个独立的 server.js 实例（自带 env），用于"环境异常时桥降级"的用例。
+ * 调用方负责 kill。失败路径在这里就把子进程处置掉——留在后台的子进程会吊住套件。
+ *
+ * cwd 保持 APP_DIR，脚本走绝对路径：require 是按**文件所在目录**解析的，
+ * 与被 spawn 的脚本同目录等价；而把 cwd 也指过去会让 Windows 上随后的
+ * rmSync 因"CWD 被占用"失败。
+ */
+async function startExtraServer({ scriptDir = APP_DIR, env }) {
+  const entry = path.join(scriptDir, 'server.js');
+  const child = spawn(process.execPath, [entry], { cwd: APP_DIR, env });
+  let out = '';
+  try {
+    const port = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('额外实例启动超时:\n' + out)), 10000);
+      timer.unref();
+      child.stdout.on('data', c => {
+        out += c;
+        const m = out.match(/localhost:(\d+)/);
+        if (m) { clearTimeout(timer); resolve(Number(m[1])); }
+      });
+      child.stderr.on('data', c => (out += c));
+      child.on('exit', code => { clearTimeout(timer); reject(new Error('额外实例退出 code=' + code + '\n' + out)); });
+    });
+    return { child, port, output: () => out };
+  } catch (err) {
+    child.kill();
+    throw err;
+  }
+}
+
+/** 轮询子进程输出直到匹配，或超时。两个计时器都 unref，且都会清掉 */
+function waitForOutput(srv, re, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    let poll, deadline;
+    poll = setInterval(() => {
+      if (!re.test(srv.output())) return;
+      clearInterval(poll);
+      clearTimeout(deadline);
+      resolve();
+    }, 25);
+    poll.unref();
+    deadline = setTimeout(() => {
+      clearInterval(poll);
+      reject(new Error(`未等到 ${re}，实际输出:\n${srv.output()}`));
+    }, timeoutMs);
+    deadline.unref();
   });
 }
 
@@ -392,4 +466,110 @@ test('/bridge 拒绝伪造 Host 的升级请求（DNS rebinding 防线仍接线�
   } finally {
     if (leaked) leaked.terminate();
   }
+});
+
+test('token 文件里的 token 就是桥接受的那个（适配器接线端到端）', async () => {
+  // server.js 把 writeToken() 的返回值接到桥的 token 上。这条线接错（比如传的是
+  // undefined）时，页面分支（Origin）照样能连上，只有适配器连不上——上面那条接受
+  // 测试走的正是页面分支，覆盖不到这里，所以必须单独守。
+  const WebSocket = require('ws');
+  const token = fs.readFileSync(path.join(tmpHome, '.webterm', 'bridge-token'), 'utf8').trim();
+  assert.match(token, /^[0-9a-f]{64}$/, '前置：token 文件里应有内容');
+
+  let ws = null;
+  try {
+    ws = await new Promise((resolve, reject) => {
+      // 不带 Origin = 非浏览器 = 适配器分支，此时唯一的凭据就是文件里的 token
+      const sock = new WebSocket(`ws://127.0.0.1:${port}/bridge`, { headers: { 'x-webterm-token': token } });
+      const timer = setTimeout(() => reject(new Error('2s 内未完成升级')), 2000);
+      timer.unref();
+      sock.on('open', () => { clearTimeout(timer); resolve(sock); });
+      sock.on('error', e => { clearTimeout(timer); reject(e); });
+      sock.on('unexpected-response', (_r, res) => { clearTimeout(timer); reject(new Error('HTTP ' + res.statusCode)); });
+    });
+
+    // 被当作已鉴权的适配器接纳：请求能进桥并被处理（页面未连上 → PAGE_NOT_CONNECTED）
+    const answer = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('2s 内未收到桥的应答')), 2000);
+      timer.unref();
+      ws.on('message', d => { clearTimeout(timer); resolve(JSON.parse(d.toString())); });
+    });
+    ws.send(JSON.stringify({ id: 't6-adapter-1', kind: 'req', domain: 'port', op: 'list', args: {} }));
+
+    const msg = await answer;
+    assert.strictEqual(msg.id, 't6-adapter-1');
+    assert.strictEqual(msg.error && msg.error.code, 'PAGE_NOT_CONNECTED');
+  } finally {
+    if (ws) ws.terminate();
+  }
+});
+
+// ── 桥降级：桥是附加能力，任何一环坏掉都不得让终端不可用（spec 5.6） ──
+
+test('缺 node_modules 时 AI 桥降级且终端仍可用（全新安装不装依赖）', async t => {
+  // 全新安装的形态：源码在、node_modules 不在。ws 是桥的运行时依赖且不入版本库，
+  // 它若在加载期就抛，附加功能会把"零依赖即可运行"的终端整体搞死。
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-nodeps-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-home-'));
+  let srv = null;
+  t.after(() => {
+    if (srv) srv.child.kill();
+    fs.rmSync(appDir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  // 前提校验：本用例靠"ws 解析不到"成立。环境若在祖先目录提供了 ws，跳过而非假通过
+  try {
+    require.resolve('ws', { paths: [appDir] });
+    t.skip('该环境能从 ' + appDir + ' 解析到 ws，无法模拟"未安装依赖"');
+    return;
+  } catch { /* 解析不到，正是要模拟的场景 */ }
+
+  for (const f of ['server.js', 'bridge.js', 'bridge-protocol.js', 'bridge-auth.js']) {
+    fs.copyFileSync(path.join(APP_DIR, f), path.join(appDir, f));
+  }
+
+  srv = await startExtraServer({
+    scriptDir: appDir,
+    env: { ...process.env, PORT: '0', WEBTERM_HOME: home },
+  });
+
+  await waitForOutput(srv, /AI 桥不可用/);
+  assert.match(srv.output(), /npm install/, '降级必须响亮且给出可执行的补救：' + srv.output());
+
+  // 终端本身照常干活：跑一次真实的写盘往返
+  const res = await requestWithin(srv.port, 'POST', '/api/save-log', {
+    headers: okHeadersFor(srv.port),
+    body: { dir: path.join(home, 'logs'), filename: 'no-deps.txt', content: 'alive' },
+  });
+  assert.strictEqual(res.status, 200, '缺依赖不得影响终端写盘: ' + res.status + ' ' + res.text);
+  assert.ok(fs.existsSync(path.join(home, 'logs', 'no-deps.txt')), '文件应真的落盘');
+
+  // 桥没挂上就不该留下 token：一份用不上的凭证只会让 AI 侧误判"桥在跑"
+  assert.ok(!fs.existsSync(path.join(home, '.webterm', 'bridge-token')), '降级时不应写 token');
+});
+
+test('token 写不出来时 AI 桥降级且终端仍可用', async t => {
+  // 拿一个普通文件占住 WEBTERM_HOME 的路径，bridge-auth.js 的 mkdirSync 必然 ENOTDIR。
+  // 这一步在 listen 回调里，不兜底就是"端口已经绑好之后"以未处理异常退出。
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-blocked-'));
+  const blocker = path.join(base, 'not-a-dir');
+  fs.writeFileSync(blocker, 'x');
+  let srv = null;
+  t.after(() => {
+    if (srv) srv.child.kill();
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  srv = await startExtraServer({ env: { ...process.env, PORT: '0', WEBTERM_HOME: blocker } });
+
+  await waitForOutput(srv, /AI 桥不可用/);
+  assert.match(srv.output(), /token/, '应说清是 token 写不出来：' + srv.output());
+
+  const res = await requestWithin(srv.port, 'POST', '/api/save-log', {
+    headers: okHeadersFor(srv.port),
+    body: { dir: path.join(base, 'logs'), filename: 'no-token.txt', content: 'alive' },
+  });
+  assert.strictEqual(res.status, 200, 'token 写不出来不得影响终端: ' + res.status + ' ' + res.text);
+  assert.ok(fs.existsSync(path.join(base, 'logs', 'no-token.txt')), '文件应真的落盘');
 });

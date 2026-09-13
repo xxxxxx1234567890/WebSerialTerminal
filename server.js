@@ -1,8 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { writeToken } = require('./bridge-auth.js');
-const { attachBridge } = require('./bridge.js');
+// 桥的两个模块**不在这里 require**：见下方 mountBridge 的说明
 
 // 仅监听回环地址。本进程具备"把内容写到任意目录"的能力，
 // 绑定全部网卡等于把写盘接口暴露给局域网（Host/Origin 校验只挡浏览器）。
@@ -224,19 +223,46 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res, pathname);
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`WebTerm Pro running at http://localhost:${server.address().port}`);
+// ── AI 桥 ───────────────────────────────────────────────
 
-  // ── AI 桥 ─────────────────────────────────────────────
-  // 桥与静态服务同生共死：页面能存在就说明本进程在跑，因此不需要额外的常驻进程。
-  // 刻意放在 listen 回调里，而不是模块作用域：端口真的分配成功后才写 token（端口被
-  // 占用时不留下一份永远用不上的 token），并且这条日志严格排在 "running at" 之后——
-  // 测试 harness 靠那一行抓端口，新增日志不得插到它前面。
-  const { token: bridgeToken, filePath: bridgeTokenPath } = writeToken();
-  console.log(`[bridge] token 已写入 ${bridgeTokenPath}`);
+/**
+ * 挂载 AI 桥。桥是附加能力而不是依赖——spec 第 5.6 节：桥挂掉绝不能影响终端正常
+ * 使用。因此整条装配链一律兜底：任何一环失败都只降级桥，静态服务与 /api/save-log
+ * 照常工作。但失败必须**响亮**：静默降级会让 AI 侧收到"读不到 token（请先启动
+ * server.js）"这类指向完全错误方向的提示，比直接报错更难排查。
+ *
+ * require 也因此在函数里做，而不是放进文件顶部：bridge.js 会拉入 ws，而
+ * node_modules 不入版本库。顶部 require 意味着一次没跑过 npm install 的全新安装
+ * 会在启动时直接 MODULE_NOT_FOUND——附加功能把"零依赖即可运行"的终端整体搞死。
+ */
+function mountBridge() {
+  // 使用者看裸堆栈毫无用处，只留首行
+  const detail = err => String((err && err.message) || err).split('\n')[0];
+
+  let attachBridge, writeToken;
+  try {
+    ({ attachBridge } = require('./bridge.js'));
+    ({ writeToken } = require('./bridge-auth.js'));
+  } catch (err) {
+    console.error('[bridge] AI 桥不可用：' + detail(err) +
+      '。请在本目录运行 npm install 后重启。终端本身不受影响。');
+    return;
+  }
+
+  let token, filePath;
+  try {
+    ({ token, filePath } = writeToken());
+  } catch (err) {
+    // token 写不出来就不挂桥：挂上去也没有适配器能通过鉴权，只会把上面那句
+    // 误导性的提示喂给 AI。宁可不提供，也不提供一个永远连不上的工具
+    console.error('[bridge] AI 桥不可用：无法写入 token 文件（' + detail(err) +
+      '）。请检查用户主目录或 WEBTERM_HOME 的写权限。终端本身不受影响。');
+    return;
+  }
+  console.log(`[bridge] token 已写入 ${filePath}`);
 
   const bridge = attachBridge(server, {
-    token: bridgeToken,
+    token,
     // 判定函数由本模块注入，而不是从本模块导出：既不改动既有逻辑，也让桥能脱离
     // server.js 单测。upgrade 监听由 bridge.js 自己挂，这里不重复实现。
     isTrustedOrigin,
@@ -248,6 +274,15 @@ server.listen(PORT, HOST, () => {
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => { bridge.close(); process.exit(0); });
   }
+}
+
+server.listen(PORT, HOST, () => {
+  console.log(`WebTerm Pro running at http://localhost:${server.address().port}`);
+  // 桥与静态服务同生共死：页面能存在就说明本进程在跑，因此不需要额外的常驻进程。
+  // 挂在 listen 回调里而不是模块作用域：端口真的分配成功后才写 token（端口被占用
+  // 时不留下一份永远用不上的 token），并且它的日志严格排在 "running at" 之后——
+  // 测试 harness 靠那一行抓端口，新增日志不得插到它前面。
+  mountBridge();
 }).on('error', err => {
   if (err.code === 'EADDRINUSE') {
     console.error(`端口 ${PORT} 已被占用，请关闭占用进程后重试`);
