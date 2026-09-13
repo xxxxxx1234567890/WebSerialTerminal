@@ -233,10 +233,13 @@ Claude Code ──stdio──► mcp-server.js ──bridge 消息──► brid
 > `{ txHex, outcome, rxHex, responseTimeMs, slaveId, funcCode, pduHex }`，
 > **原始 TX/RX 帧与 PDU，没有任何解析后的寄存器值，也没有线圈位图**。异常时以
 > `exceptionCode` / `exceptionText` 取代 `funcCode` / `pduHex`（`slaveId` 仍在）；
-> 超时时只回 `txHex` / `outcome` / `note`。多格式渲染只存在于页面自己的 DOM 表格
+> 超时时只回 `txHex` / `outcome` / `note`；CRC 校验失败时回
+> `txHex` / `outcome` / `rxHex` / `responseTimeMs` / `note`（同样没有 `slaveId` / `funcCode` / `pduHex`）。
+> 多格式渲染只存在于页面自己的 DOM 表格
 > （`WebSerialTerminal.html` 的 `modbusShowParsedData()`，属于本次改动之前就存在的
 > Modbus 调试面板），**MCP 工具从不上报它**。解码留给调用方：寄存器字节在 `pduHex` 里，
-> 功能码 03/04 的首字节是字节数，其后每 2 字节一个寄存器。
+> 功能码 03/04 的 `pduHex` **首字节是功能码，第 2 字节才是字节数**，其后每 2 字节一个寄存器、
+> 大端序（字节数 = 2 × 寄存器个数）。例：`03020064` = 功能码 03、字节数 02、一个寄存器 `0x0064` = 100。
 >
 > 本次一并改正原句"**工具描述已同步说明**"：那句话断言的一致性当时并不存在——描述里
 > 写的是同一套多格式承诺。现已真正同步：`mcp-server.js` 的 `modbus_request` 描述、

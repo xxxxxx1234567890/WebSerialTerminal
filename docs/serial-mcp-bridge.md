@@ -304,7 +304,7 @@ PORT=3000 npm start
 | `serial_send` | 发数据（`ascii` / `hex` / `base64`），记入 `[AI]` 审计 |
 | `serial_read` | 按游标拉取增量输出，含 `dropped` / `truncated` |
 | `modbus_control` | 模式切换、连断、启停、轮询控制 |
-| `modbus_request` | 语义化 Modbus RTU 请求（CRC 自动计算）。返回**原始 TX/RX 完整帧 + `pduHex` + `responseTimeMs` + `slaveId`/`funcCode`/`outcome`（异常时给 `exceptionCode`/`exceptionText`）**；**不解析寄存器值、也不给线圈位图**，解码由调用方按功能码自行完成（03/04 的 `pduHex` 首字节是字节数，其后每 2 字节一个寄存器）。**只在 independent 模式下可用**，见下方说明 |
+| `modbus_request` | 语义化 Modbus RTU 请求（CRC 自动计算）。返回**原始 TX/RX 完整帧 + `pduHex` + `responseTimeMs` + `slaveId`/`funcCode`/`outcome`（异常时给 `exceptionCode`/`exceptionText`；CRC 校验失败时给 `txHex`/`outcome`/`rxHex`/`responseTimeMs`/`note`，**没有** `slaveId`/`funcCode`/`pduHex`）**；**不解析寄存器值、也不给线圈位图**，解码由调用方按功能码自行完成（03/04 的 `pduHex` **首字节是功能码**，第 2 字节才是**字节数**，之后每 2 字节一个寄存器、大端序，字节数 = 2 × 寄存器个数；例 `03020064` = 功能码 03、字节数 02、一个寄存器 `0x0064` = 100）。**只在 independent 模式下可用**，见下方说明 |
 | `modbus_log` | Modbus 历史报文 |
 | `ui_action` | 清屏、暂停、主题、字号、宏、保存日志 |
 | `ui_inspect` | 终端**实际渲染结果**（行文本 + 计算后颜色），验证 ANSI 解析/高亮的手段 |

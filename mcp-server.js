@@ -67,7 +67,7 @@ function buildTools() {
     },
     {
       name: 'modbus_request',
-      description: '发送一条语义化 Modbus RTU 请求并返回响应原始帧，CRC16 由页面自动计算。\n\n支持的功能码：01 读线圈、02 读离散输入、03 读保持寄存器、04 读输入寄存器、05 写单线圈、06 写单寄存器、15(0F) 写多线圈、16(10) 写多寄存器。\n\n返回值包含：请求与响应的完整 HEX 帧（txHex / rxHex）与响应 PDU（pduHex）、响应时间（responseTimeMs）、从站号与功能码（slaveId / funcCode）、以及异常码的中文描述（异常时给 exceptionCode / exceptionText）。**不返回解析后的寄存器值，也不返回线圈位图**——寄存器与线圈数据原始地躺在 rxHex / pduHex 里，需你按功能码自行解码（功能码 03/04：pduHex 首字节是字节数，其后每 2 字节一个寄存器）。设备超时为 500ms：超时时只返回 txHex、outcome 与一条 note。\n\n**必须在 independent 模式下调用**：shared 模式会冻结终端读循环，响应字节在解析前就被丢弃，本工具只能等到超时。写操作尤其危险——字节真的发到了线缆上，返回值却说"设备没响应"，据此重试就等于重复写。本工具在 shared 模式下会直接拒绝并说明，请先 modbus_control {action:"set_mode", mode:"independent"} 并 connect。\n\n写操作会直接改变设备状态，请确认目标地址无误。',
+      description: '发送一条语义化 Modbus RTU 请求并返回响应原始帧，CRC16 由页面自动计算。\n\n支持的功能码：01 读线圈、02 读离散输入、03 读保持寄存器、04 读输入寄存器、05 写单线圈、06 写单寄存器、15(0F) 写多线圈、16(10) 写多寄存器。\n\n返回值包含：请求与响应的完整 HEX 帧（txHex / rxHex）与响应 PDU（pduHex）、响应时间（responseTimeMs）、从站号与功能码（slaveId / funcCode）、以及异常码的中文描述（异常时给 exceptionCode / exceptionText）。**不返回解析后的寄存器值，也不返回线圈位图**——寄存器与线圈数据原始地躺在 rxHex / pduHex 里，需你按功能码自行解码（功能码 03/04：pduHex 首字节是**功能码**，第 2 字节才是**字节数**，之后每 2 字节一个寄存器、大端序，字节数 = 2 × 寄存器个数。例：pduHex "03020064" = 功能码 03、字节数 02、一个寄存器 0x0064 = 100）。设备超时为 500ms：超时时只返回 txHex、outcome 与一条 note；CRC 校验失败时返回 txHex、outcome、rxHex、responseTimeMs 与一条 note，同样**没有** slaveId / funcCode / pduHex。\n\n**必须在 independent 模式下调用**：shared 模式会冻结终端读循环，响应字节在解析前就被丢弃，本工具只能等到超时。写操作尤其危险——字节真的发到了线缆上，返回值却说"设备没响应"，据此重试就等于重复写。本工具在 shared 模式下会直接拒绝并说明，请先 modbus_control {action:"set_mode", mode:"independent"} 并 connect。\n\n写操作会直接改变设备状态，请确认目标地址无误。',
       inputSchema: {
         type: 'object',
         properties: {
