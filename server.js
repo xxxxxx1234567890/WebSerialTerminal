@@ -227,9 +227,15 @@ const server = http.createServer((req, res) => {
 
 /**
  * 挂载 AI 桥。桥是附加能力而不是依赖——spec 第 5.6 节：桥挂掉绝不能影响终端正常
- * 使用。因此整条装配链一律兜底：任何一环失败都只降级桥，静态服务与 /api/save-log
- * 照常工作。但失败必须**响亮**：静默降级会让 AI 侧收到"读不到 token（请先启动
- * server.js）"这类指向完全错误方向的提示，比直接报错更难排查。
+ * 使用。因此整条装配链一律兜底，失败点共有三处，缺一处就是"端口已绑定之后进程
+ * 被未捕获异常杀掉"（此时终端连静态页面都打不开）：
+ *   ① require 桥模块失败（例如没跑过 npm install）
+ *   ② writeToken() 失败（用户目录不可写）
+ *   ③ attachBridge() 装配失败（ws 能加载但 API 损坏，例如半装导致
+ *      WebSocketServer 未定义）
+ * 三处都只降级桥，静态服务与 /api/save-log 照常工作。但失败必须**响亮**：静默降级
+ * 会让 AI 侧收到"读不到 token（请先启动 server.js）"这类指向完全错误方向的提示，
+ * 比直接报错更难排查。
  *
  * require 也因此在函数里做，而不是放进文件顶部：bridge.js 会拉入 ws，而
  * node_modules 不入版本库。顶部 require 意味着一次没跑过 npm install 的全新安装
@@ -261,15 +267,25 @@ function mountBridge() {
   }
   console.log(`[bridge] token 已写入 ${filePath}`);
 
-  const bridge = attachBridge(server, {
-    token,
-    // 判定函数由本模块注入，而不是从本模块导出：既不改动既有逻辑，也让桥能脱离
-    // server.js 单测。upgrade 监听由 bridge.js 自己挂，这里不重复实现。
-    isTrustedOrigin,
-    isLocalHostname,
-    hostnameOf,
-    getActualPort: () => (server.address() ? server.address().port : PORT),
-  });
+  let bridge;
+  try {
+    bridge = attachBridge(server, {
+      token,
+      // 判定函数由本模块注入，而不是从本模块导出：既不改动既有逻辑，也让桥能脱离
+      // server.js 单测。upgrade 监听由 bridge.js 自己挂，这里不重复实现。
+      isTrustedOrigin,
+      isLocalHostname,
+      hostnameOf,
+      getActualPort: () => (server.address() ? server.address().port : PORT),
+    });
+  } catch (err) {
+    // 走到这里说明端口**已经绑定成功**：若不兜底，异常会冒泡出 listen 回调，
+    // 变成未捕获异常把进程杀掉——终端页面随即 404，而用户看到的只是"服务没了"。
+    // 与上面两处同形：只降级桥，并把原因与补救一起打印出来。
+    console.error('[bridge] AI 桥不可用：装配失败（' + detail(err) +
+      '）。终端静态服务与日志保存不受影响。请重新安装依赖（npm install）后重启。');
+    return;
+  }
 
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => { bridge.close(); process.exit(0); });

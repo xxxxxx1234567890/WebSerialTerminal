@@ -464,7 +464,16 @@ test('stdio 入口：畸形行不致命、stdout 只有协议消息、诊断走 
 
   // 注意先等响应到齐再 end()：stdin 结束时入口会 process.exit(0)，
   // 抢在 stdout 冲刷之前退出会丢掉响应（有界问题，但会让本用例假红）
-  await waitFor(() => out.split('\n').filter(Boolean).length >= 2, 5000);
+  //
+  // 谓词必须同时要求"应答完整"，不能只看行数：第二行**尚未收到终止换行**时行数
+  // 就已 >= 2，而下面会对那一行 JSON.parse——被切断的半行会抛错，表现为偶发假红
+  // （一个偶尔说谎的套件比没有套件更糟，它会污染整个项目的证据链）。
+  // out.endsWith('\n') 说明最后一行的换行已经到达，即每一行都是完整的。
+  const complete = await waitFor(
+    () => out.endsWith('\n') && out.split('\n').filter(Boolean).length >= 2, 5000);
+  // 用上 waitFor 的返回值：丢掉它就等于"等到没等到都往下走"，
+  // 失败会以 JSON.parse 的神秘报错浮现，而不是一条说明白的话。
+  assert.strictEqual(complete, true, '5s 内未收到两条完整应答，实际 stdout：' + JSON.stringify(out));
 
   assert.strictEqual(child.exitCode, null, '畸形行把进程带崩了——它必须被跳过而不是致命');
 

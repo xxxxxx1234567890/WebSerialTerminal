@@ -43,7 +43,7 @@
     if (cleaned.length % 2 !== 0) throw new Error('hex 长度必须是偶数（每字节两位）');
     if (!/^[0-9a-fA-F]+$/.test(cleaned)) throw new Error('hex 含非法字符');
     const out = new Uint8Array(cleaned.length / 2);
-    for (let i = 0; i < out.length; i++) out[i] = parseInt(cleaned.substr(i * 2, 2), 16);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(cleaned.slice(i * 2, i * 2 + 2), 16);
     return out;
   }
 

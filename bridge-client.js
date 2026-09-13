@@ -95,8 +95,14 @@
    *
    * 校验在桥侧做，不改既有的 modbusSend()：非法参数应当得到 INVALID_ARGS，
    * 而不是把字面量 "undefined" 写进用户可见的表单再等 1500ms 超时。
+   *
+   * quantity 用于 FC15/16 的长度核对，**必须**传：modbusConstructFrame 按 quantity
+   * 推出 byteCount 后逐字节取 writeData[i]，越界取到的 undefined 会经
+   * `new Uint8Array()` 静默变成 0——线缆上的字节与调用方给的数据不一致却不报错
+   * （FC15/16 是"写多寄存器"，补零写下去会真的改掉设备状态）。
+   * 不传（undefined/非整数）时跳过长度核对，保留"只做编码检查"的单参用法。
    */
-  function normalizeWriteData(funcCode, raw) {
+  function normalizeWriteData(funcCode, raw, quantity) {
     let bytes;
     try {
       bytes = P.hexToBytes(String(raw).trim());
@@ -108,6 +114,16 @@
         throw new Error(`功能码 ${funcCode} 的 writeData 必须正好 2 字节（16 位值），收到 ${bytes.length} 字节`);
       }
       return { text: Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' '), value: (bytes[0] << 8) | bytes[1] };
+    }
+    // FC15 按位打包（ceil(quantity/8) 字节），FC16 每寄存器 2 字节。
+    // 与 modbusConstructFrame 的 byteCount 用同一个算式，两处必须同源。
+    if (Number.isInteger(quantity) && (funcCode === 15 || funcCode === 16)) {
+      const expect = funcCode === 15 ? Math.ceil(quantity / 8) : quantity * 2;
+      if (bytes.length !== expect) {
+        throw new Error(funcCode === 15
+          ? `功能码 15 的 writeData 必须正好 ${expect} 字节（${quantity} 个线圈 → 每 8 个 1 字节），收到 ${bytes.length} 字节`
+          : `功能码 16 的 writeData 必须正好 ${expect} 字节（${quantity} 个寄存器 × 2 字节），收到 ${bytes.length} 字节`);
+      }
     }
     return {
       text: Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' '),
@@ -129,6 +145,29 @@
     } catch {
       return JSON.stringify(a.data) + '（无法按 ' + encoding + ' 编码）';
     }
+  }
+
+  /**
+   * 从终端行里取出"连接为何失败"。
+   *
+   * connectPort() 的 catch 只把原因 appendLine 进终端、**不重抛**（既有函数体不改，
+   * 这是最小侵入的替代路径），所以失败原因只能从它刚写下的那一行里读回来。
+   * 丢了原因，serial.connect 就只剩一句"连接未成功建立"，而 translateError 会给它
+   * 追加"这通常是 WebTerm 自身的缺陷"——把端口占用这类外部原因诊断成自家的 bug。
+   *
+   * 取**最后**一条匹配：一次失败的连接尝试可能留下多条错误行，最新的一条才对应本次。
+   * 形如 `✖ 连接失败: Failed to open serial port.`（内容由页面 appendLine 决定）。
+   * 锚定在行首：不锚的话，设备恰好回显一句含"连接失败: "的文本（它也会进同一缓冲区）
+   * 就会被当成连接失败的原因——一条凭空捏造的归因。锚定后只有整行以此开头才命中。
+   */
+  function parseConnectFailure(lines) {
+    if (!Array.isArray(lines)) return null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const raw = String(lines[i] == null ? '' : lines[i]).trim();
+      const m = /^(?:✖\s*)?连接失败\s*[:：]\s*(.+)$/.exec(raw);
+      if (m && m[1].trim()) return m[1].trim();
+    }
+    return null;
   }
 
   /**
@@ -171,19 +210,31 @@
           // 参数只能取自 mv*：modbusStartCycle → modbusViewSend → modbusViewSync 会用
           // mv* 覆盖 mb* 之后才构造帧，读 mb* 会报出一个线缆上不会发生的目标。
           case 'cycle_start': {
-            const data = f('writeData') === '?' ? '' : ' 数据=' + f('writeData');
+            // 只有写功能码的帧才携带载荷：modbusConstructFrame 对 FC 1-4 只放
+            // quantity，对非写功能码取不到 writeData。表格里留着旧值也照打的话，
+            // 审计行会声称一个线缆上不存在的载荷（对人类输入同一条规则：记的必须
+            // 是线缆上的字节，而不是输入框里恰好还剩什么）。
+            const cycFc = Number(f('funcCode'));
+            const cycData = MODBUS_WRITE_FUNCS.includes(cycFc) && f('writeData') !== '?'
+              ? ' 数据=' + f('writeData') : '';
             return `Modbus 启动轮询 slave=${f('slaveId')} fc=${f('funcCode')} addr=${f('address')}`
-                 + ` qty=${f('quantity')} 间隔=${f('cycleIntervalMs')}ms${data}`;
+                 + ` qty=${f('quantity')} 间隔=${f('cycleIntervalMs')}ms${cycData}`;
           }
           case 'cycle_stop': return 'Modbus 停止轮询';
           default: return 'Modbus control：' + or(a.action);
         }
       }
       case 'modbus.request': {
-        const data = a.writeData === undefined || a.writeData === null || a.writeData === ''
-          ? '' : ' 数据=' + a.writeData;
+        // 载荷只在写功能码的帧里存在。读功能码（1/2/3/4）即便调用方顺手带了
+        // writeData，modbusConstructFrame 也不会把它放进帧——照打就会报出一个
+        // 线缆上不存在的载荷，而那正是"事后追溯得出错误结论"的形态。
+        // 格式化后的值来自人类输入，但**写这一行的动作**可以由 AI 触发，
+        // 因此它同样会进 AI 读取的缓冲，必须按帧的真实内容设门。
+        const reqData = MODBUS_WRITE_FUNCS.includes(Number(a.funcCode))
+          && a.writeData !== undefined && a.writeData !== null && a.writeData !== ''
+          ? ' 数据=' + a.writeData : '';
         return `Modbus 请求 slave=${or(a.slaveId)} fc=${or(a.funcCode)} addr=${or(a.address)}`
-             + ` qty=${or(a.quantity)}${data}`;
+             + ` qty=${or(a.quantity)}${reqData}`;
       }
       case 'ui.action': {
         // 宏必须带上实际会发出的命令：只记宏名的话，追溯要靠"宏定义在被查时仍未改动"，
@@ -195,7 +246,12 @@
       }
       case 'dev.serial_source': return `串口源切到 ${or(a.mode)}`;
       case 'dev.fake_inject': return '假设备注入 ' + describeData(a, a.encoding || 'hex');
-      case 'dev.fake_script': return `设置 ${(a.rules || []).length} 条假设备应答规则`;
+      // 规则条数：非数组真值（如 rules:'abc'）经 .length 会产出字面量 undefined，
+      // 审计行里的 "undefined" 看起来像一个真实取值。与 or() 同一条规则。
+      case 'dev.fake_script': {
+        const n = Array.isArray(a.rules) ? a.rules.length : (a.rules == null ? 0 : '?');
+        return `设置 ${n} 条假设备应答规则`;
+      }
       default: return domain + '.' + op;
     }
   }
@@ -203,7 +259,7 @@
   if (isNode) {
     return {
       makeRingBuffer, normalizeSendArgs, classifyWrite, isWriteOp,
-      normalizeWriteData, describeWrite, describeData,
+      normalizeWriteData, describeWrite, describeData, parseConnectFailure,
     };
   }
 
@@ -237,8 +293,13 @@
     const err = (code, message) => Object.assign(new Error(message), { code });
 
     // ── 武装开关：默认关闭 ──
-    // 用独立的 localStorage 键，不塞进 wtp_settings：saveState() 按 settings 的固定字段整体
-    // 回写，往里加额外字段可能在下次保存时被覆盖掉。独立键也便于用户单独清除。
+    // 用独立的 localStorage 键，不塞进 wtp_settings。理由有两条，都和
+    // "把安全状态混进界面配置"有关：
+    //   1) loadState() 用 { ...settings, ...存档 } 整体合并存档，settings 是主题/字号
+    //      这类显示偏好的容器。武装状态一旦成为它的字段，任何一次"设置回退/清空重来"
+    //      都会顺带改掉"AI 能否写硬件"——反过来，用户以为重置了设置，写入权限却还在。
+    //   2) 独立键可以单独清除（localStorage.removeItem('wtp_ai_armed')，或只清这一项），
+    //      不必为了收回一次授权而连带丢掉全部终端配置。
     const ARMED_KEY = 'wtp_ai_armed';
     function isArmed() {
       try { return localStorage.getItem(ARMED_KEY) === '1'; } catch { return false; }
@@ -373,9 +434,25 @@
           audit('已处于连接状态，未重复连接');
           return { alreadyConnected: true };
         }
+        // 记下游标：connectPort() 失败时只把原因写进终端、不重抛，所以"为什么没连上"
+        // 只能从它刚写下的那几行里读回来（见 parseConnectFailure）。
+        const mark = rb.cursor;
         // 走 withAuthorizedPort：AI 免手势，绝不弹选择框（人工点按钮才弹）
         await withAuthorizedPort(args && args.index, () => connectPort());
-        if (!isConnected) throw err(P.ERROR_CODES.PAGE_ERROR, '连接未成功建立');
+        if (!isConnected) {
+          const reason = parseConnectFailure(rb.since(mark).lines);
+          // 另一套串口栈正持有端口时（Modbus 独立模式），本次失败最可能就是争用——
+          // 这正是 spec §4.5 为 PORT_BUSY 定义的场景，此前实现里没有任何产出点。
+          // 不把页面报告的原因藏起来：即便归因错了，原文也在消息里，可被推翻。
+          if (modbusConnected && modbusPortMode === 'independent') {
+            throw err(P.ERROR_CODES.PORT_BUSY,
+              'Modbus 独立串口当前正持有一个物理端口，终端很可能与之争用同一台设备'
+              + (reason ? '（页面报告：' + reason + '）' : '（页面未给出具体原因）'));
+          }
+          // 真实原因原样带出，而不是笼统的"连接未成功建立"——后者会被
+          // translateError 追加"这通常是 WebTerm 自身的缺陷"
+          throw err(P.ERROR_CODES.PAGE_ERROR, reason || '连接未成功建立');
+        }
         // 成功后补一条带结果的审计（哪个口、多少波特）——连接失败时只有 dispatcher
         // 那条"意图"审计，成功时两条合起来才说得清"对哪台设备做了什么"
         const info = (port && port.getInfo) ? port.getInfo() : {};
@@ -408,7 +485,10 @@
 
       'serial.read': async args => {
         const max = Math.min(Number(args && args.max) || READ_DEFAULT, P.READ_MAX_LINES);
-        const cursor = Number(args && args.cursor) || 0;
+        // 负数游标必须先夹到 0：rb.since(-5) 会算出 dropped = nextSeq + 5，
+        // 报出一个**不存在的**"你漏了 N 条"信号——AI 据此会去重新同步一个
+        // 它其实从未落后过的读取位置（实测 since(-5) → dropped:7）。
+        const cursor = Math.max(0, Number(args && args.cursor) || 0);
         const r = rb.since(cursor);
         const truncated = r.lines.length > max;
         const lines = truncated ? r.lines.slice(0, max) : r.lines;
@@ -451,7 +531,15 @@
           case 'deactivate':
             if (modbusActive) { document.getElementById('mbActivate').checked = false; modbusToggleActive(); }
             break;
-          case 'cycle_start': modbusStartCycle(); break;
+          case 'cycle_start':
+            // modbusStartCycle() 在 !modbusActive 时会 early-return，什么也没发生；
+            // 若不在这里先行拒绝，dispatcher 写的"意图"审计行就会成为一条**没有对应
+            // 失败行**的记录——事后会把"从未启动的轮询"读成真的在跑。
+            // modbus.request 有同样的前置，这里也必须一致。
+            if (!modbusActive) {
+              throw err(P.ERROR_CODES.INVALID_ARGS, 'Modbus 未启用，轮询无法启动，请先 modbus_control activate');
+            }
+            modbusStartCycle(); break;
           case 'cycle_stop': modbusStopCycle(); break;
           default: throw err(P.ERROR_CODES.INVALID_ARGS, '未知 action: ' + action);
         }
@@ -468,6 +556,25 @@
         const a = args || {};
         if (!modbusActive) {
           throw err(P.ERROR_CODES.INVALID_ARGS, 'Modbus 未启用，请先 modbus_control activate');
+        }
+        // shared 模式**收不到响应**，所以这里必须先行拒绝，不能"发出去等超时"。
+        //
+        // 依据：shared 模式下 modbusToggleActive()/modbusSetMode() 会把 isPaused 置为
+        // true（冻结终端），而 readLoop 的暂停分支是 `rxDecoder.decode(); continue;`——
+        // 它在 modbusFeedResponse(value) 之前就 continue 了。于是响应字节被丢弃、
+        // 页面永远解析不出结果，modbusStartWait 必然 500ms 后超时。
+        // 对写操作尤其危险：字节真的写到了线缆上，而返回值说"设备没响应"——
+        // 据此重试就是重复写。宁可失败得早、说得清楚。
+        // （页面既有逻辑不改；本限制是可预期的行为，不是缺陷，故用 INVALID_ARGS
+        //  传达"当前状态/参数组合不可用"，九个错误码清单不动。）
+        if (modbusPortMode === 'shared') {
+          throw err(P.ERROR_CODES.INVALID_ARGS,
+            'shared 模式无法执行 modbus_request：该模式会冻结终端读循环，'
+            + 'Modbus 响应字节在解析前就被丢弃，本请求只会等到 500ms 超时'
+            + '（写操作更危险——字节已经写到线缆上，返回值却说设备没响应）。'
+            + '请先 modbus_control {action:"set_mode", mode:"independent"} 再 connect 独立串口。'
+            + '若当前只有终端那一个串口可用，则本工具在此模式下不可用；'
+            + '请让用户在页面的 Modbus 面板里手动收发。');
         }
         const hasWriter = modbusPortMode === 'independent' ? modbusConnected : isConnected;
         if (!hasWriter) throw err(P.ERROR_CODES.PORT_NOT_CONNECTED, 'Modbus 当前没有可用串口');
@@ -500,7 +607,7 @@
           if (a.writeData === undefined || a.writeData === null || a.writeData === '') {
             throw err(P.ERROR_CODES.INVALID_ARGS, `功能码 ${funcCode} 需要 writeData（十六进制，如 "00 0A"）`);
           }
-          try { write = normalizeWriteData(funcCode, a.writeData); }
+          try { write = normalizeWriteData(funcCode, a.writeData, quantity); }
           catch (e) { throw err(P.ERROR_CODES.INVALID_ARGS, e.message); }
         }
 
@@ -575,7 +682,14 @@
 
         switch (action) {
           case 'clear': clearTerminal(); break;
-          case 'pause': if (!isPaused) togglePause(); break;
+          case 'pause':
+            if (!isPaused) togglePause();
+            // 让轨迹本身带上这个事实：暂停期间到达的数据被直接丢弃、且 dropped 不会
+            // 反映它（spec §4.4：AI 在"以为输出连续"的前提下做判断比收到报错更危险）。
+            // 工具描述里也写了，但描述只在模型的上下文里；这一行落在**事后可导出**的
+            // 终端日志里，是追溯时唯一看得到的形态。
+            audit('注意：暂停期间到达的串口数据会被直接丢弃且无法补读，恢复后 serial_read 的 dropped 仍为 0；需要不丢数据的观察窗口请用 serial_read 拉取，不要 pause');
+            break;
           case 'resume': if (isPaused) togglePause(); break;
 
           // applySettings() 从 DOM 读值、不接参数，所以先回填输入框再调用。
@@ -752,19 +866,23 @@
       if (!caps.includes(msg.domain)) {
         return P.makeErr(msg.id, P.ERROR_CODES.OP_UNSUPPORTED, `本页面不支持域 ${msg.domain}`);
       }
-      if (isWriteOp(msg.domain, msg.op, msg.args)) {
-        if (!isArmed()) {
-          return P.makeErr(msg.id, P.ERROR_CODES.NOT_ARMED,
-            'AI 写入未启用。请在页面上打开"允许 AI 写入"开关后重试（读取类操作不受限制）。');
-        }
-        // 审计在这里集中做，不下放到各 handler：spec 第 5.5 节把 [AI] 轨迹定为
-        // "不做逐次确认"的唯一补偿控制，覆盖必须是结构性的——散着写迟早会漏掉一个，
-        // 而漏掉的那个（比如"启动轮询"）正是事后唯一说不清的操作。
-        // 审计行本身不得因参数问题消失，故 describeWrite 保证不抛。
-        audit(describeWrite(msg.domain, msg.op, msg.args,
-          readPageSnapshot(msg.domain, msg.op, msg.args)));
-      }
+      // 武装检查与审计一并放进 try：readPageSnapshot 要读 DOM、describeWrite 要解析
+      // 参数，任何一处抛错都会越过下面的 catch 落到 ws.onmessage 的外层 catch——
+      // 那条路径**不发响应**，AI 只能白等 30s 超时。本文件的铁律是任何路径都不得把
+      // 异常抛回页面代码，等价地：也不得有任何一条路径不给响应。
       try {
+        if (isWriteOp(msg.domain, msg.op, msg.args)) {
+          if (!isArmed()) {
+            return P.makeErr(msg.id, P.ERROR_CODES.NOT_ARMED,
+              'AI 写入未启用。请在页面上打开"允许 AI 写入"开关后重试（读取类操作不受限制）。');
+          }
+          // 审计在这里集中做，不下放到各 handler：spec 第 5.5 节把 [AI] 轨迹定为
+          // "不做逐次确认"的唯一补偿控制，覆盖必须是结构性的——散着写迟早会漏掉一个，
+          // 而漏掉的那个（比如"启动轮询"）正是事后唯一说不清的操作。
+          // 审计行本身不得因参数问题消失，故 describeWrite 保证不抛。
+          audit(describeWrite(msg.domain, msg.op, msg.args,
+            readPageSnapshot(msg.domain, msg.op, msg.args)));
+        }
         const data = await handler(msg.args || {});
         return P.makeRes(msg.id, data);
       } catch (e) {

@@ -49,6 +49,23 @@ test('close 使待决 read() resolve {done:true}', async () => {
   assert.deepStrictEqual(await pending, { value: undefined, done: true });
 });
 
+test('close 后 readable/writable 置回 null（与真机语义一致，不留已关闭的流）', async () => {
+  // 留着已关闭的流会让 `port.readable` 这类判断恒为真：readLoop 的外层循环条件
+  // 若只依赖它，就会在同一个已关闭的流上反复 getReader → 忙循环，而不是干净退出。
+  const p = new FakeSerialPort();
+  await p.open({});
+  assert.ok(p.readable && p.writable);
+  await p.close();
+  assert.strictEqual(p.readable, null, 'close 后不得再取到已关闭的 readable');
+  assert.strictEqual(p.writable, null, 'close 后不得再取到已关闭的 writable');
+  assert.throws(() => p.injectBytes(new Uint8Array([1])), /未打开/,
+    '注入仍应报"未打开"，而不是对着 null controller 抛 TypeError');
+  // 重新 open 仍要拿到全新的流（真机允许关闭后重开）
+  await p.open({});
+  assert.ok(p.readable instanceof ReadableStream);
+  assert.ok(p.writable instanceof WritableStream);
+});
+
 test('injectBytes 送达读取方，且不合并相邻分块语义', async () => {
   const p = new FakeSerialPort();
   await p.open({});
@@ -139,7 +156,10 @@ test('默认调度器（真实 setTimeout）在 delayMs 后回注', async () => 
   const w = p.writable.getWriter();
   await w.write(new Uint8Array([0x01, 0x03]));
 
-  await sleep(30); // 真实计时器：等 5ms 的定时器到期，证明回注是"延时"而非"同步塞入"
+  // 这 30ms 只是给默认调度器的 5ms 定时器一点提前量，**并不证明"回注是延时的"**——
+  // 同步入队也会得到同样的结果。真正的证据是下一行的有界等待：若默认调度器被删掉或
+  // 接错，回注永远不会发生，race 会在 200ms 后以 'no-response' 落地并被断言抓住。
+  await sleep(30);
   // 有界等待：默认调度器失效时立刻失败并说明原因，而不是把整个文件挂到超时。
   const raced = await Promise.race([reader.read(), sleep(200).then(() => 'no-response')]);
   assert.notStrictEqual(raced, 'no-response', '默认调度器未在 200ms 内回注响应');

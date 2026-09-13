@@ -215,7 +215,7 @@ Claude Code ──stdio──► mcp-server.js ──bridge 消息──► brid
 | | `set_mode` | `shared` / `independent`（复用 `modbusSetMode`） |
 | | `connect` / `disconnect` | independent 模式（复用 `modbusConnectPort`） |
 | | `activate` / `deactivate` | shared 模式；响应**必须说明终端已被冻结** |
-| | `request` | 语义化：`{ slaveId, funcCode, address, quantity, writeData, format }` → 多格式寄存器值 / 线圈位图 / 异常码 / 响应时间 |
+| | `request` | 语义化：`{ slaveId, funcCode, address, quantity, writeData }` → 多格式寄存器值 / 线圈位图 / 异常码 / 响应时间。**仅 independent 模式**：shared 模式冻结终端读循环，响应在解析前就被丢弃，故直接拒绝而不是发出去等超时 |
 | | `cycle_start` / `cycle_stop` / `log` | 轮询控制与历史报文 |
 | `ui` | `set_theme` / `set_font` / `toggle_sidebar` / `run_macro` / `list_macros` / `save_log` | 复用现有函数 |
 | | `clear` / `pause` / `resume` | 视图状态操作，复用 `clearTerminal()` / `togglePause()` |
@@ -226,6 +226,16 @@ Claude Code ──stdio──► mcp-server.js ──bridge 消息──► brid
 | | `fake_script` | 预设 `[{match, respond, delayMs}]`，让假设备**自动应答** |
 
 `fake_script` 是把假串口从"手动喂字节"升级为"模拟一台真设备"的关键——使完整的 Modbus 往返可无硬件闭环。
+
+> 修订记录（终审）：`request` 原设计的 `format` 参数**未实现**——改为总返回全格式
+> （HEX/U16/I16/F32 一次给全）。理由：多一次往返只换来模型自己也能做的格式转换，
+> 而"少一次调用"对上下文与失败面都是净收益。工具描述已同步说明。
+
+> 另两处与本文的偏离，实现为准（终审收口）：
+> - §5.5 的武装开关**存独立的 `wtp_ai_armed` 键**，不塞进 `wtp_settings`：武装是安全状态，
+>   不该与主题/字号这类显示偏好共用一条存档（`loadState()` 用 `{...settings, ...存档}`
+>   整体合并，任何一次"恢复默认设置"都会顺带改掉写入权限），且独立键可单独清除。
+> - §8.2 的超时统一为桥侧一档 10s，见该节修订记录。
 
 ### 4.4 决定 ⑥：读取用拉取式，不用推送式
 
@@ -455,8 +465,15 @@ MCP 工具结果是文本，AI 读的是句子而非 JSON：
 
 ### 8.2 超时默认值
 
-- 读操作：5s
-- 写操作：10s
+- 桥侧统一 **10s**（`bridge.js` 的 `DEFAULT_TIMEOUT_MS`），读操作与写操作同一档
+
+> **修订记录（终审）**：本节原写"读操作 5s / 写操作 10s"两档，实现是统一 10s。
+> 按实现收口（而不是给读操作加一条更短的路径）：桥的超时计时器只有一条路径，
+> 分档需要额外分支与额外测试，而读操作同样可能触发页面侧的慢路径（DOM 遍历、
+> `ui.inspect` 的 `getComputedStyle`），5s 反而更容易误判成"页面卡死"。
+> 真正区分"页面卡死"与"页面慢"的是 `BRIDGE_TIMEOUT` 的文案，不是两档阈值。
+> 测试可用 `attachBridge` 的 `deps.timeoutMs` 覆盖，不受此默认值限制。
+
 - `modbus_request`：页面侧 500ms 响应超时 + 余量
 
 桥的请求表**必须有容量上限 + 过期清理**，否则反复超时会持续吃内存。

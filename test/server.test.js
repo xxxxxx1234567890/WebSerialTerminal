@@ -83,7 +83,9 @@ function rawRequest(raw) {
     sock.on('data', c => (data += c));
     sock.on('close', () => resolve(data));
     sock.on('error', e => resolve('ERR:' + e.code));
-    setTimeout(() => { sock.destroy(); resolve(data); }, 2000);
+    // unref：正常路径里 close 会先到，这个兜底计时器还活着的话会白拖 2s 事件循环
+    // （每轮一个用例，5 千多个用例就是白等）
+    setTimeout(() => { sock.destroy(); resolve(data); }, 2000).unref();
   });
 }
 
@@ -547,6 +549,56 @@ test('缺 node_modules 时 AI 桥降级且终端仍可用（全新安装不装�
 
   // 桥没挂上就不该留下 token：一份用不上的凭证只会让 AI 侧误判"桥在跑"
   assert.ok(!fs.existsSync(path.join(home, '.webterm', 'bridge-token')), '降级时不应写 token');
+});
+
+test('attachBridge 装配失败时响亮降级，进程不被未捕获异常杀掉（端口已绑定的那一段）', async t => {
+  // 触发窗口很窄但后果最重：ws 能 require 成功、API 却是坏的（半装/坏包），
+  // 于是 attachBridge 里的 new WebSocketServer(...) 抛 TypeError。它发生在
+  // server.listen 回调内——**端口已经绑定成功之后**——若不兜底，异常会成为未捕获
+  // 异常直接杀掉进程：终端页面随即打不开，而用户看到的只是"服务没了"。
+  // spec §5.6：桥的任何环节都不得让终端不可用。
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-badws-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-home-'));
+  let srv = null;
+  t.after(() => {
+    if (srv) srv.child.kill();
+    fs.rmSync(appDir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  for (const f of ['server.js', 'bridge.js', 'bridge-protocol.js', 'bridge-auth.js']) {
+    fs.copyFileSync(path.join(APP_DIR, f), path.join(appDir, f));
+  }
+  // 一个"能加载但没有 WebSocketServer"的 ws：正是半装后的形状
+  const wsStub = path.join(appDir, 'node_modules', 'ws');
+  fs.mkdirSync(wsStub, { recursive: true });
+  fs.writeFileSync(path.join(wsStub, 'package.json'),
+    JSON.stringify({ name: 'ws', version: '0.0.0', main: 'index.js' }));
+  fs.writeFileSync(path.join(wsStub, 'index.js'), 'module.exports = {};\n');
+  // 前提校验：必须解析到我们放的桩，否则这条用例什么也没模拟
+  assert.strictEqual(require.resolve('ws', { paths: [appDir] }),
+    path.join(wsStub, 'index.js'));
+
+  srv = await startExtraServer({
+    scriptDir: appDir,
+    env: { ...process.env, PORT: '0', WEBTERM_HOME: home },
+  });
+
+  await waitForOutput(srv, /AI 桥不可用/);
+  assert.match(srv.output(), /装配失败/, '降级必须点明是哪一环失败：' + srv.output());
+  assert.match(srv.output(), /npm install/,
+    '降级必须给出可执行的补救：' + srv.output());
+  assert.strictEqual(srv.child.exitCode, null,
+    '装配失败不得让进程退出——端口此时已绑定，等于把终端一起搞死');
+
+  // 终端照常：跑一次真实的写盘往返（临时 appDir 里没有页面文件，故用与
+  // "缺 node_modules"那条同样的探针——它证明 HTTP 链路整体仍然可用）
+  const res = await requestWithin(srv.port, 'POST', '/api/save-log', {
+    headers: okHeadersFor(srv.port),
+    body: { dir: path.join(home, 'logs'), filename: 'bad-ws.txt', content: 'alive' },
+  });
+  assert.strictEqual(res.status, 200, '装配失败不得影响终端写盘: ' + res.status + ' ' + res.text);
+  assert.ok(fs.existsSync(path.join(home, 'logs', 'bad-ws.txt')), '文件应真的落盘');
 });
 
 test('token 写不出来时 AI 桥降级且终端仍可用', async t => {

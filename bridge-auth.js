@@ -28,9 +28,12 @@ function readToken(dir = baseDir()) {
   const filePath = tokenPath(dir);
   try {
     return fs.readFileSync(filePath, 'utf8').trim();
-  } catch {
-    // 静默重试会让 AI 看到一个永远连不上的工具，比直接报错更难排查
-    throw new Error(`读不到桥 token（${filePath}）。请先启动 server.js（npm start）。`);
+  } catch (err) {
+    // 静默重试会让 AI 看到一个永远连不上的工具，比直接报错更难排查。
+    // 用 cause 保留原始错误（ENOENT / EACCES / EPERM 的区别决定了是"没启动"
+    // 还是"权限不对"），两者同为"读不到 token"却要不同的补救动作。
+    throw new Error(`读不到桥 token（${filePath}）。请先启动 server.js（npm start）。`,
+      { cause: err });
   }
 }
 

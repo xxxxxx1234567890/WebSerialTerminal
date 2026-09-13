@@ -7,7 +7,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const {
   makeRingBuffer, normalizeSendArgs, classifyWrite, isWriteOp,
-  normalizeWriteData, describeWrite,
+  normalizeWriteData, describeWrite, parseConnectFailure,
 } = require('../bridge-client.js');
 
 // ════════════════════════════════════════════════════════
@@ -140,6 +140,28 @@ test('normalizeWriteData 对非法写数据抛出可读错误（而不是静默�
   assert.throws(() => normalizeWriteData(6, ''), /writeData/, '空值应报错');
   assert.throws(() => normalizeWriteData(6, '00 0A 0B'), /2 字节/, 'FC6 必须是 16 位值');
   assert.throws(() => normalizeWriteData(5, 'AA'), /2 字节/, 'FC5 必须是 16 位值');
+});
+
+test('normalizeWriteData 对 FC15/16 校验长度：帧按 quantity 推 byteCount，短数据会被静默补零', () => {
+  // modbusConstructFrame 的 FC16 分支：byteCount = quantity*2，再逐字节取
+  // writeData[i]；越界取到的 undefined 经 new Uint8Array() 变成 0——线缆上的字节
+  // 与调用方给的数据不一致却**不报错**（FC15/16 是"写多寄存器"，补零会真的改设备状态）。
+  assert.throws(() => normalizeWriteData(16, '01', 2), /正好 4 字节/,
+    'quantity=2 需要 4 字节，只给 1 字节必须报错而不是补 3 个零');
+  assert.throws(() => normalizeWriteData(16, '00 64 00', 2), /正好 4 字节/, '少一个字节同样要报错');
+  assert.throws(() => normalizeWriteData(16, '00 64 00 C8 FF', 2), /正好 4 字节/, '多一个字节也不接受');
+  assert.throws(() => normalizeWriteData(15, '01', 16), /正好 2 字节/,
+    'FC15 按位打包：16 个线圈 = 2 字节');
+  assert.throws(() => normalizeWriteData(15, '01 02 03', 8), /正好 1 字节/, 'FC15 多给也要报错');
+
+  // 与 byteCount 同算式的正例：这些必须通过，且字节原样落到帧上
+  assert.deepStrictEqual(Array.from(normalizeWriteData(16, '00 64 00 C8', 2).value),
+    [0x00, 0x64, 0x00, 0xC8]);
+  assert.deepStrictEqual(Array.from(normalizeWriteData(15, '01 03', 16).value), [0x01, 0x03]);
+  assert.deepStrictEqual(Array.from(normalizeWriteData(15, '0F', 4).value), [0x0F], '4 个线圈恰好 1 字节');
+
+  // 不传 quantity 时跳过长度核对（保留"只做编码检查"的单参用法）
+  assert.doesNotThrow(() => normalizeWriteData(16, '00 64 00 C8'));
 });
 
 test('normalizeWriteData 的结果能被 modbusConstructFrame 正确编码进帧', () => {
@@ -289,4 +311,79 @@ test('审计行里不得出现字面量 undefined（缺参一律给可读占位�
     const desc = describeWrite(d, o, a, {});
     assert.ok(!desc.includes('undefined'), `${d}.${o} ${JSON.stringify(a)} 的审计行含 undefined：${desc}`);
   }
+});
+
+// ════════════════════════════════════════════════════════
+// 六、审计的载荷必须按**帧里真实存在的东西**设门
+// ════════════════════════════════════════════════════════
+// 格式化后的值源自人类，但"写这一行的动作"可以由 AI 触发，所以错误载荷一样会落进
+// AI 读取的缓冲里，成为一条假记录。两处共用同一个门：MODBUS_WRITE_FUNCS。
+
+test('读功能码的 modbus.request 审计行不得声称一个线缆上不存在的载荷', () => {
+  // 实测复现过的形态：AI 给读功能码（3）顺手带了 writeData，
+  // 审计行打出「数据=00 0A」，而 modbusConstructFrame 对 FC1-4 根本不取 writeData
+  const read = describeWrite('modbus', 'request',
+    { slaveId: 1, funcCode: 3, address: 0, quantity: 2, writeData: '00 0A' }, {});
+  assert.ok(!read.includes('数据='),
+    '读功能码的帧里没有载荷，审计行不得声称有：' + read);
+  assert.match(read, /fc=3/, '目标信息本身仍要完整');
+
+  // 写功能码必须照打（否则就是把真实载荷藏起来）
+  for (const fc of [5, 6, 15, 16]) {
+    const w = describeWrite('modbus', 'request',
+      { slaveId: 1, funcCode: fc, address: 0, quantity: 1, writeData: '00 0A' }, {});
+    assert.ok(w.includes('数据=00 0A'), `FC${fc} 是写功能码，载荷必须记下：` + w);
+  }
+});
+
+test('轮询审计行同样按功能码设门（FC1-4 不带载荷）', () => {
+  const page = wd => ({
+    cycle: { slaveId: '1', funcCode: '3', address: '0', quantity: '10',
+             writeData: wd, cycleIntervalMs: '1000' },
+  });
+  // 表单里残留着上一次写的载荷，而轮询此刻跑的是读功能码 —— 这正是 mvWriteData
+  // 会留下的形态：不设门就会报出一个轮询永远不会发出去的载荷
+  const read = describeWrite('modbus', 'control', { action: 'cycle_start' }, page('00 0A'));
+  assert.ok(!read.includes('数据='),
+    '读功能码的轮询不带载荷，表单里的残留值不得进审计行：' + read);
+
+  const write = describeWrite('modbus', 'control', { action: 'cycle_start' }, {
+    cycle: { slaveId: '1', funcCode: '16', address: '0', quantity: '1',
+             writeData: '00 0A', cycleIntervalMs: '1000' },
+  });
+  assert.ok(write.includes('数据=00 0A'), '写功能码的轮询要记下载荷：' + write);
+});
+
+test('非数组 rules 不得在审计行里产出字面量 undefined', () => {
+  // (a.rules || []).length 对字符串等真值会产出 undefined——看起来像一个真实取值
+  for (const rules of ['abc', 5, true, { a: 1 }]) {
+    const desc = describeWrite('dev', 'fake_script', { rules }, {});
+    assert.ok(!desc.includes('undefined'), `rules=${JSON.stringify(rules)} 时审计行含 undefined：${desc}`);
+    assert.match(desc, /条假设备应答规则/, '仍要是可读的一行：' + desc);
+  }
+  assert.match(describeWrite('dev', 'fake_script', { rules: [] }, {}), /0 条/);
+  assert.match(describeWrite('dev', 'fake_script', {}, {}), /0 条/, '缺参按 0 条（setRules([]) 实际就是清空）');
+});
+
+// ════════════════════════════════════════════════════════
+// 七、连接失败的原因提取（serial.connect 用它把真实原因带给 AI）
+// ════════════════════════════════════════════════════════
+
+test('parseConnectFailure 从终端行里取出真实原因，取最新的一条', () => {
+  const lines = ['○ 已断开连接', '✖ 连接失败: Failed to open serial port.', '其他行'];
+  assert.strictEqual(parseConnectFailure(lines), 'Failed to open serial port.');
+  // 多条时取最新：上一次失败的原因不该盖住本次
+  assert.strictEqual(
+    parseConnectFailure(['✖ 连接失败: 旧原因', '✖ 连接失败: 新原因']), '新原因');
+  // 没有失败行时必须返回 null（让调用方退回通用文案，而不是编一个原因）
+  assert.strictEqual(parseConnectFailure(['○ 已断开连接']), null);
+  assert.strictEqual(parseConnectFailure([]), null);
+  assert.strictEqual(parseConnectFailure(undefined), null);
+  // 页面把它写成全角冒号或带 ✖ 前缀都要认得
+  assert.strictEqual(parseConnectFailure(['✖ 连接失败：端口被占用']), '端口被占用');
+  // 只有前缀、没有内容时视为没有原因
+  assert.strictEqual(parseConnectFailure(['✖ 连接失败: ']), null);
+  // 必须锚定行首：设备回显的文本里恰好含"连接失败: "不得被当成归因（那是凭空捏造的原因）
+  assert.strictEqual(parseConnectFailure(['设备日志：连接失败: 内部错误']), null,
+    '不锚定行首的话，设备回显会被误读成连接失败的原因');
 });

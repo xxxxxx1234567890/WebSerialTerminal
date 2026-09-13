@@ -100,6 +100,13 @@
       this._open = false;
       // close() 令待决 read() resolve {done:true}，与原生语义一致
       try { this._controller.close(); } catch { /* 已关闭 */ }
+      // 置回 null：真机的 readable/writable 在 close 后即不可再取。
+      // 留着已关闭的流会让 readLoop 的 `port.readable` 判断恒为真——今天因
+      // isConnected 先行置 false 而不可达，但它把"再次 getReader"变成忙循环，
+      // 而不是干净退出（此处是纯改善，不依赖今天是否可达）。
+      this._readable = null;
+      this._writable = null;
+      this._controller = null;
     }
 
     injectBytes(bytes) {

@@ -186,12 +186,12 @@ AI 拿到的不是裸错误码，而是翻译过的人话。下表是对照：
 | 错误码 | 含义 | 该怎么办 |
 |---|---|---|
 | `NEEDS_USER_GESTURE` | 没有已授权端口，浏览器要求用户手势 | **停下请用户点一次页面「连接」按钮**；重试无效 |
-| `PORT_BUSY` | 物理端口被另一套串口栈占用 | 断开占用方，或把 Modbus 切到 `shared` 复用终端端口 |
-| `PAGE_NOT_CONNECTED` | 桥上没有页面 | 请用户打开 `http://localhost:1982` |
+| `PORT_BUSY` | 物理端口被另一套串口栈占用（典型是 Modbus 独立串口正持着它） | 先断开占用方（`serial_disconnect` / `modbus_control {action:"disconnect"}`）再重试。**不要**为了腾端口把 Modbus 切到 `shared`——它并不释放端口，而且 shared 模式下 `modbus_request` 收不到响应（见 §8 的说明） |
+| `PAGE_NOT_CONNECTED` | 桥上没有页面 | 请用户打开提示里给出的那个地址（默认 `http://localhost:1982`；换过端口时会自动跟着变） |
 | `BRIDGE_TIMEOUT` | 页面未在 10s 内响应 | 页面可能卡住；先用 `webterm_status` 探活 |
 | `PORT_NOT_CONNECTED` | 端口没开 | 先 `serial_connect` |
 | `NOT_ARMED` | 写入类操作，但武装开关没开 | 请用户打开「允许 AI 写入」 |
-| `INVALID_ARGS` | 参数校验失败（也用于请求过频、请求 ID 冲突） | 按消息修正参数；放慢调用频率 |
+| `INVALID_ARGS` | 参数校验失败（也用于请求过频、请求 ID 冲突、shared 模式下的 `modbus_request`） | 按消息修正参数；放慢调用频率 |
 | `OP_UNSUPPORTED` | 页面能力清单里没有该域/操作 | 提示用户刷新页面（页面版本较旧） |
 | `PAGE_ERROR` | 页面内部抛错 | 转告用户排查 |
 
@@ -296,15 +296,41 @@ PORT=3000 npm start
 | 工具 | 说明 |
 |---|---|
 | `webterm_status` | 终端 + Modbus 两套栈的完整状态快照（排障第一步） |
-| `serial_connect` / `serial_disconnect` | 连接 / 断开终端串口 |
+| `serial_connect` / `serial_disconnect` | 连接 / 断开终端串口。失败时会把页面报告的**真实原因**带出来（例如"端口已被占用"），并据此走 `PORT_BUSY` |
 | `serial_send` | 发数据（`ascii` / `hex` / `base64`），记入 `[AI]` 审计 |
 | `serial_read` | 按游标拉取增量输出，含 `dropped` / `truncated` |
 | `modbus_control` | 模式切换、连断、启停、轮询控制 |
-| `modbus_request` | 语义化 Modbus RTU 请求（CRC 自动计算，寄存器多种格式解析） |
+| `modbus_request` | 语义化 Modbus RTU 请求（CRC 自动计算，寄存器多种格式**一次全给**，无需再指定 `format`）。**只在 independent 模式下可用**，见下方说明 |
 | `modbus_log` | Modbus 历史报文 |
 | `ui_action` | 清屏、暂停、主题、字号、宏、保存日志 |
 | `ui_inspect` | 终端**实际渲染结果**（行文本 + 计算后颜色），验证 ANSI 解析/高亮的手段 |
 | `dev_serial` | 假串口控制，见第 5 节 |
+
+### 8.1 `modbus_request` 为什么只在 independent 模式下可用
+
+`shared` 模式（复用终端串口）会**冻结终端读循环**——冻结显示与冻结响应解析是同一件事。
+页面的读循环在暂停分支会直接丢弃该段字节，其中就包括 Modbus 响应，所以页面永远解析不出
+应答，请求只能等到 500ms 超时。
+
+对**写操作**这一点尤其危险：字节确实写到了线缆上，返回值却说"设备没响应"，据此重试就是
+重复写。因此 `modbus_request` 在 shared 模式下会**直接拒绝**（`INVALID_ARGS`）并说明原因，
+而不是发出去等超时。需要用响应时请：
+
+```text
+1. modbus_control {action:"set_mode", mode:"independent"}
+2. modbus_control {action:"connect"}          # 连 Modbus 自己的串口（需真人授权过该设备）
+3. modbus_request {slaveId:1, funcCode:3, address:0, quantity:1}
+```
+
+若当前只有终端那一个串口可用，则 `modbus_request` 在此模式下不可用——请让用户在页面的
+Modbus 面板里手动收发（面板里同样是这个限制，UI 会显示"响应超时"）。
+
+### 8.2 `ui_action {action:"pause"}` 会丢数据
+
+`pause` 暂停的不只是显示：暂停期间到达的串口数据会被**直接丢弃**，既不渲染、也不进
+`serial_read` 的读取缓冲，而且恢复后 `dropped` **仍然是 0**——也就是说它不会告诉你丢过
+东西。需要一段不丢数据的观察窗口时，请用 `serial_read` 主动拉取，不要 `pause`。
+每次 `pause` 都会在终端日志里留下一条说明这一点的 `[AI]` 记录。
 
 ---
 

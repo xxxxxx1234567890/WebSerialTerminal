@@ -23,30 +23,42 @@ let server, bridge, port;
 
 const url = () => `ws://127.0.0.1:${port}/bridge`;
 
-function connectPage({ origin, path = '/bridge', host } = {}) {
+/**
+ * 连接的上界：对端若既不接受也不拒绝（例如 upgrade 处理器没挂上、或服务端卡住），
+ * 原来的实现会让整个套件**无限悬着**——npm test 不带 --test-timeout，挂起即无界。
+ * 这里把它变成一条可读的断言失败，并且**先处置掉 socket 再失败**：
+ * 泄漏的 socket 会让随后的 server.close() 永远等不到回调，失败又会退化成挂死。
+ */
+function withConnectBound(ws, what, timeoutMs = 2000) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, {
-      origin: origin === undefined ? `http://localhost:${port}` : origin,
-      // 伪造 Host 以验证 DNS rebinding 防线：ws 把用户 headers 交给 http.request，
-      // 显式 Host 会盖掉 Node 依据 URL 自动生成的那个
-      ...(host === undefined ? {} : { headers: { Host: host } }),
+    const timer = setTimeout(() => {
+      try { ws.terminate(); } catch { /* 已断 */ }
+      reject(new Error(`${what} 在 ${timeoutMs}ms 内既未成功也未失败（连接无界挂起）`));
+    }, timeoutMs);
+    timer.unref();
+    ws.on('open', () => { clearTimeout(timer); resolve(ws); });
+    ws.on('error', err => { clearTimeout(timer); reject(err); });
+    ws.on('unexpected-response', (_req, res) => {
+      clearTimeout(timer);
+      reject(new Error('HTTP ' + res.statusCode));
     });
-    ws.on('open', () => resolve(ws));
-    ws.on('error', reject);
-    ws.on('unexpected-response', (_req, res) => reject(new Error('HTTP ' + res.statusCode)));
   });
 }
 
+function connectPage({ origin, path = '/bridge', host } = {}) {
+  return withConnectBound(new WebSocket(`ws://127.0.0.1:${port}${path}`, {
+    origin: origin === undefined ? `http://localhost:${port}` : origin,
+    // 伪造 Host 以验证 DNS rebinding 防线：ws 把用户 headers 交给 http.request，
+    // 显式 Host 会盖掉 Node 依据 URL 自动生成的那个
+    ...(host === undefined ? {} : { headers: { Host: host } }),
+  }), '页面连接');
+}
+
 function connectAdapter({ token = TOKEN, path = '/bridge', origin } = {}) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, {
-      origin,
-      headers: token === null ? {} : { 'x-webterm-token': token },
-    });
-    ws.on('open', () => resolve(ws));
-    ws.on('error', reject);
-    ws.on('unexpected-response', (_req, res) => reject(new Error('HTTP ' + res.statusCode)));
-  });
+  return withConnectBound(new WebSocket(`ws://127.0.0.1:${port}${path}`, {
+    origin,
+    headers: token === null ? {} : { 'x-webterm-token': token },
+  }), '适配器连接');
 }
 
 /**
@@ -93,23 +105,18 @@ async function attachBridgeOnNewServer(opts = {}) {
 }
 
 function connectPageTo(inst, hello) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${inst.port}/bridge`, {
-      origin: `http://localhost:${inst.port}`,
-    });
-    ws.on('open', () => { if (hello) ws.send(JSON.stringify(hello)); resolve(ws); });
-    ws.on('error', reject);
+  return withConnectBound(new WebSocket(`ws://127.0.0.1:${inst.port}/bridge`, {
+    origin: `http://localhost:${inst.port}`,
+  }), '页面连接（独立实例）').then(ws => {
+    if (hello) ws.send(JSON.stringify(hello));
+    return ws;
   });
 }
 
 function connectAdapterTo(inst) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${inst.port}/bridge`, {
-      headers: { 'x-webterm-token': TOKEN },
-    });
-    ws.on('open', () => resolve(ws));
-    ws.on('error', reject);
-  });
+  return withConnectBound(new WebSocket(`ws://127.0.0.1:${inst.port}/bridge`, {
+    headers: { 'x-webterm-token': TOKEN },
+  }), '适配器连接（独立实例）');
 }
 
 before(async () => {

@@ -381,7 +381,15 @@ test('审计覆盖：每个写入操作都留下可读的 [AI] 行（含最高�
   const added = b.audits().slice(before);
   assert.deepStrictEqual(added.filter(l => l.startsWith('✖ 失败：')), [],
     '这些操作都应成功，不该出现失败行');
-  assert.strictEqual(added.length, cases.length,
+  // ui.action pause 除意图行外还会**追加一条**说明（暂停期数据被丢弃、dropped 不反映它），
+  // 那不是"意图"，而是让轨迹本身带上这个事实。先摘掉它，等式才仍然成立。
+  const informational = added.filter(l => l.startsWith('注意：暂停期间'));
+  assert.strictEqual(informational.length, 1,
+    'ui.action pause 必须留下一条说明"暂停期数据被丢弃且无法补读"的轨迹行：\n' + added.join('\n'));
+  assert.match(informational[0], /丢弃/, '说明行必须点出数据被丢弃：' + informational[0]);
+  assert.match(informational[0], /dropped/, '并点出 dropped 不会反映它（否则 AI 会以为输出连续）');
+  const intents = added.filter(l => !informational.includes(l));
+  assert.strictEqual(intents.length, cases.length,
     '每个写入操作应恰好留下一条意图审计行，实际：\n' + added.join('\n'));
 
   // 最高危的一条：轮询会持续对真实硬件发报文，行里必须说清对谁发什么。
@@ -416,6 +424,11 @@ test('轮询审计行报的是线缆上真正会发生的目标（两表单分�
   b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
   b.sandbox.isConnected = true;
   b.sandbox.modbusActive = true;
+  // modbus.request 只在 independent 模式下可用（shared 模式会冻结终端读循环、
+  // 响应在解析前被丢弃，故被显式拒绝）。本用例要的是"AI 写 mb* 造成两表单分叉"，
+  // 与模式无关，故用能跑通的 independent。
+  b.sandbox.modbusPortMode = 'independent';
+  b.sandbox.modbusConnected = true;
 
   // 1) 制造分叉：写 mb*（AI 的 modbus.request 就是这么干的）
   await b.req('modbus', 'request',
@@ -488,6 +501,10 @@ test('modbus.request 先校验再碰 DOM：非法参数回 INVALID_ARGS，不改
   b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
   b.sandbox.isConnected = true;               // 让"有可用串口"这一关先过
   b.sandbox.modbusActive = true;              // 让"Modbus 已启用"这一关先过
+  // 同上：shared 模式现在会被显式拒绝，本用例考的是"参数校验先于碰 DOM"，
+  // 故用能走到校验那一步的 independent。
+  b.sandbox.modbusPortMode = 'independent';
+  b.sandbox.modbusConnected = true;
 
   const form = () => ({
     slaveId: b.ids.get('mbSlaveId').value,
@@ -637,3 +654,195 @@ test('已连接时的空操作 serial.connect 也要有结果行', async t => {
   assert.match(added[1], /已处于连接状态/, '结果行要说明没有实际动作');
 });
 
+// ════════════════════════════════════════════════════════
+// 六、模式前置：shared 模式下 modbus_request 收不到响应，必须先行拒绝
+//
+// shared 模式会冻结终端（isPaused=true），而 readLoop 的暂停分支是
+// `rxDecoder.decode(); continue;`——它在 modbusFeedResponse(value) 之前就 continue，
+// 于是响应字节被丢弃、页面永远解析不出结果、modbusStartWait 必然 500ms 后超时。
+// 对**写操作**尤其危险：字节真的写到了线缆上，返回值却说"设备没响应"，
+// AI 据此重试就是重复写。宁可失败得早、说得清楚。
+// ════════════════════════════════════════════════════════
+
+test('shared 模式下 modbus.request 直接失败，并指出该切到 independent', async t => {
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  b.sandbox.modbusActive = true;
+  b.sandbox.isConnected = true;
+  b.sandbox.modbusPortMode = 'shared';
+
+  const before = b.audits().length;
+  const r = await b.req('modbus', 'request',
+    { slaveId: 1, funcCode: 3, address: 0, quantity: 2 });
+
+  assert.strictEqual(r.ok, false, 'shared 模式不得"发出去等超时"，必须直接失败');
+  assert.strictEqual(r.error.code, 'INVALID_ARGS', JSON.stringify(r));
+  assert.match(r.error.message, /shared/, '必须点出是 shared 模式的问题');
+  assert.match(r.error.message, /independent/, '必须给出下一步：切到 independent');
+  assert.match(r.error.message, /冻结|丢弃/, '必须说明响应为何收不到');
+  assert.strictEqual(b.sandbox.__sendCalled, undefined,
+    '拒绝必须是前置的：不得真的把帧写到线缆上');
+
+  // 失败的写操作仍要有配对的结果行（否则只留一条从未发生的意图行）
+  const added = b.audits().slice(before);
+  assert.ok(added.some(l => l.startsWith('✖ 失败：')), '必须补一条失败行：' + added.join('\n'));
+  assert.ok(!added.some(l => l.includes('Modbus → ')), '不得留下"发出了某帧"的记录：' + added.join('\n'));
+});
+
+test('切到 independent 并连上独立串口后，modbus.request 照常可用', async t => {
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  b.sandbox.modbusActive = true;
+  b.sandbox.modbusPortMode = 'independent';
+  b.sandbox.modbusConnected = true;
+
+  const r = await b.req('modbus', 'request',
+    { slaveId: 1, funcCode: 6, address: 0, quantity: 1, writeData: '000A' });
+  assert.strictEqual(r.ok, true, 'independent 是唯一可行的那条路，不能被一起挡掉：' + JSON.stringify(r));
+  assert.strictEqual(r.data.outcome, 'success');
+});
+
+test('未启用 Modbus 时 cycle_start 先失败：不留一条"从未启动的轮询"记录', async t => {
+  // modbusStartCycle() 在 !modbusActive 时 early-return，什么也没发生；
+  // 若不前置拒绝，dispatcher 写的意图行就成了**没有对应失败行**的记录。
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  b.sandbox.modbusActive = false;
+
+  const before = b.audits().length;
+  const r = await b.req('modbus', 'control', { action: 'cycle_start' });
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.strictEqual(r.error.code, 'INVALID_ARGS');
+  assert.strictEqual(b.sandbox.__cycleStarted, undefined, '不得真的启动轮询');
+
+  const added = b.audits().slice(before);
+  assert.ok(added.some(l => l.startsWith('Modbus 启动轮询')), '意图行仍在（审计不因前置失败而消失）：' + added.join('\n'));
+  assert.ok(added.some(l => l.startsWith('✖ 失败：')), '必须有配对的失败行：' + added.join('\n'));
+});
+
+// ════════════════════════════════════════════════════════
+// 七、serial_read 的游标夹取：不存在的"你漏了 N 条"信号
+// ════════════════════════════════════════════════════════
+
+test('serial.read 对负数游标不发假 dropped 信号', async t => {
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  for (const x of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) b.sandbox.bridgeNoteOutput(x);
+
+  // rb.since(-5) 会算出 dropped = nextSeq + 5 = 7（实测过的形态）——一个**不存在的**
+  // "你漏了 7 条"信号，AI 据此会去重新同步一个它从未落后过的位置
+  const r = await b.req('serial', 'read', { cursor: -5 });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(r.data.dropped, 0, '负数游标不得被解释成"漏了 N 条"：' + JSON.stringify(r.data));
+  assert.strictEqual(r.data.lines.length, 7, '仍应返回全部可读行');
+});
+
+// ════════════════════════════════════════════════════════
+// 八、任何路径都必须给出响应（否则 AI 白等 30s）
+// ════════════════════════════════════════════════════════
+
+test('审计阶段抛错也必须回一条错误响应，而不是静默不发', async t => {
+  // readPageSnapshot 要读 DOM、describeWrite 要解析参数，任何一处抛错若落在
+  // handleReq 的 try 之外，就会经 ws.onmessage 的外层 catch 变成"不发响应"——
+  // 桥侧只能等到 30s 超时，而页面看起来一切正常。
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  b.sandbox.modbusActive = true;
+
+  const orig = b.sandbox.document.getElementById;
+  b.sandbox.document.getElementById = id => {
+    if (id === 'mvSlaveId') throw new Error('DOM 炸了');
+    return orig(id);
+  };
+
+  const sentBefore = b.ws.sent.length;
+  await b.ws.deliver({ id: 'r-poison', kind: 'req', domain: 'modbus', op: 'control',
+    args: { action: 'cycle_start' } });
+
+  assert.strictEqual(b.ws.sent.length, sentBefore + 1,
+    '审计阶段抛错也必须回一条响应，否则 AI 只能白等 30s（sent 里什么都没有）');
+  const r = JSON.parse(b.ws.sent[b.ws.sent.length - 1]);
+  assert.strictEqual(r.id, 'r-poison', '响应必须对上请求 id');
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.match(r.error.message, /DOM 炸了/, '原因要带出来：' + JSON.stringify(r.error));
+
+  // 页面没坏：后续请求照常
+  b.sandbox.document.getElementById = orig;
+  const after = await b.req('serial', 'status', {});
+  assert.strictEqual(after.ok, true, '一次审计抛错不得让页面失去响应能力');
+});
+
+// ════════════════════════════════════════════════════════
+// 九、serial.connect 的失败原因（不再丢失，也不再把占用误报成自家缺陷）
+// ════════════════════════════════════════════════════════
+
+/** 一个 open() 必然失败的假端口：connectPort 的 catch 会把原因 appendLine 进终端 */
+const failingPort = message => ({
+  open: async () => { throw new Error(message); },
+  getInfo: () => ({}),
+  get writable() { return null; },
+  get readable() { return null; },
+});
+
+test('serial.connect 失败时带出页面的真实原因（不再是笼统的"连接未成功建立"）', async t => {
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  // 让 withAuthorizedPort 走"当前 provider 非真实实现"的分支，直接用我们的假端口
+  // （真实 provider 的 requestPort 在沙箱里会抛"不应被调用"）。
+  // getPorts 必须非空：withAuthorizedPort 先查已授权端口列表，空列表会先报
+  // NEEDS_USER_GESTURE，那样就测不到 connectPort 的失败路径了。
+  const port = failingPort('Failed to open serial port.');
+  b.sandbox.serialProvider = {
+    requestPort: async () => port,
+    getPorts: async () => [port],
+  };
+
+  const r = await b.req('serial', 'connect', {});
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.strictEqual(r.error.code, 'PAGE_ERROR', '非占用类失败仍是页面内部错误');
+  assert.match(r.error.message, /Failed to open serial port\./,
+    '必须把页面报告的真实原因带给 AI（否则 translateError 会把它框定成"WebTerm 自身的缺陷"）：'
+    + JSON.stringify(r.error));
+  // 这条原因确实进了终端日志（appendLine 的真实路径）
+  assert.ok(b.lines.some(l => l.includes('连接失败') && l.includes('Failed to open serial port.')),
+    '页面应把它 appendLine 进终端：' + b.lines.filter(l => l.includes('连接失败')).join('\n'));
+});
+
+test('Modbus 独立串口持着端口时，serial.connect 的失败走 PORT_BUSY（而不是"WebTerm 缺陷"）', async t => {
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  b.sandbox.modbusPortMode = 'independent';
+  b.sandbox.modbusConnected = true;
+  const port = failingPort('Failed to open serial port.');
+  b.sandbox.serialProvider = {
+    requestPort: async () => port,
+    getPorts: async () => [port],
+  };
+
+  const r = await b.req('serial', 'connect', {});
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+  assert.strictEqual(r.error.code, 'PORT_BUSY',
+    'spec §4.5 为这个场景定义了 PORT_BUSY，实现里必须真的有产出点：' + JSON.stringify(r));
+  assert.match(r.error.message, /Failed to open serial port\./,
+    '归因之外仍要保留页面报告的原因，便于推翻错误归因：' + JSON.stringify(r.error));
+});

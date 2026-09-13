@@ -147,7 +147,57 @@ test('dispatchTool 把桥的错误码翻译成自然语言', async () => {
     P.makeErr('x', P.ERROR_CODES.PAGE_NOT_CONNECTED, '页面未连接');
   const r = await M.dispatchTool('serial_read', {}, request);
   assert.strictEqual(r.isError, true);
-  assert.match(r.content[0].text, /localhost/);
+  assert.match(r.content[0].text, /127\.0\.0\.1:1982/, '文案里必须给出页面地址（默认桥地址的主机:端口）');
+});
+
+// 写死 1982 会把用户指向一个没在跑的端口：文档支持 `PORT=3000` 配 WEBTERM_BRIDGE_URL
+// 启动，此时真正的页面在 3000 上。地址必须从实际连接的桥地址推导。
+test('PAGE_NOT_CONNECTED 的页面地址由 BRIDGE_URL 推导，不写死默认端口', () => {
+  const prev = process.env.WEBTERM_BRIDGE_URL;
+  const modulePath = require.resolve('../mcp-server.js');
+  const cached = require.cache[modulePath];
+  try {
+    process.env.WEBTERM_BRIDGE_URL = 'ws://127.0.0.1:3000/bridge';
+    delete require.cache[modulePath];
+    const Custom = require('../mcp-server.js');
+    const s = Custom.translateError(P.ERROR_CODES.PAGE_NOT_CONNECTED, '');
+    assert.match(s, /http:\/\/127\.0\.0\.1:3000/, '必须指向实际使用的端口：' + s);
+    assert.ok(!s.includes('1982'), '不得仍写死默认端口：' + s);
+  } finally {
+    // 还原 env 与模块缓存，别的用例仍用文件顶部那份 M
+    if (prev === undefined) delete process.env.WEBTERM_BRIDGE_URL;
+    else process.env.WEBTERM_BRIDGE_URL = prev;
+    delete require.cache[modulePath];
+    if (cached) require.cache[modulePath] = cached;
+    else require('../mcp-server.js');
+  }
+});
+
+// 「share 模式能收到响应」这个错觉会把 AI 引向一条死路：写操作的字节真的到了线缆上，
+// 返回值却说"设备没响应"，据此重试就是重复写。限制必须写进描述——描述是约束抵达
+// 模型的唯一通道（spec 6.1）。
+test('shared 模式的响应限制写进了 modbus_control / modbus_request 的描述', () => {
+  const control = M.buildTools().find(t => t.name === 'modbus_control').description;
+  const req = M.buildTools().find(t => t.name === 'modbus_request').description;
+  for (const [name, desc] of [['modbus_control', control], ['modbus_request', req]]) {
+    assert.match(desc, /shared/, `${name} 的描述必须点出 shared 模式`);
+    assert.match(desc, /independent/, `${name} 的描述必须给出可行的那条路（independent）`);
+  }
+  assert.match(control, /收不回来|收不到/, 'modbus_control 必须说明 shared 模式收不到响应');
+  assert.match(req, /拒绝|必须在 independent/, 'modbus_request 必须说明它在 shared 下会被拒绝');
+  assert.match(req, /重复写|重试/, 'modbus_request 必须点出写操作在超时下重试 = 重复写的危险');
+});
+
+// pause 的旧描述说"数据仍会进入缓冲，可用 serial_read 读取"——与实现相反：
+// readLoop 的暂停分支在 modbusFeedResponse/渲染之前就 continue，该段字节既不渲染
+// 也不进环形缓冲，且 dropped 仍是 0。spec 4.4 把"以为输出连续"定为最危险的形态。
+test('ui_action 的 pause 描述与实现一致：暂停期数据被丢弃且无法补读', () => {
+  const desc = M.buildTools().find(t => t.name === 'ui_action').description;
+  assert.match(desc, /丢弃/, '必须说明暂停期间的数据会被丢弃：' + desc);
+  assert.match(desc, /无法补读|补读/, '必须说明丢弃后补不回来');
+  assert.match(desc, /dropped/, '必须点出 dropped 不会反映这件事（否则 AI 会以为输出连续）');
+  assert.ok(!/数据仍会进入缓冲/.test(desc),
+    '旧描述（"数据仍会进入缓冲"）与实现相反，不得残留');
 });
 
 test('dispatchTool 成功时返回 JSON 文本内容', async () => {

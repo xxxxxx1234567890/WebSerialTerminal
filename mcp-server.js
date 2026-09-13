@@ -54,7 +54,7 @@ function buildTools() {
     },
     {
       name: 'modbus_control',
-      description: '控制 Modbus 调试面板。action 取值：\n- set_mode：切换串口模式，需同时给 mode（shared 复用终端串口 / independent 独立开串口）\n- connect / disconnect：独立模式下连接或断开自己的串口\n- activate / deactivate：启用或停用 Modbus 调试\n- cycle_start / cycle_stop：启停轮询发送\n\n重要：shared 模式下 activate 会「冻结终端」——终端输入框与发送按钮被禁用，目的是防止人工操作干扰 Modbus 报文时序。返回值里的 terminalFrozen 会标明此状态。用完请及时 deactivate 以恢复终端。',
+      description: '控制 Modbus 调试面板。action 取值：\n- set_mode：切换串口模式，需同时给 mode（shared 复用终端串口 / independent 独立开串口）\n- connect / disconnect：独立模式下连接或断开自己的串口\n- activate / deactivate：启用或停用 Modbus 调试\n- cycle_start / cycle_stop：启停轮询发送\n\n重要：shared 模式下 activate 会「冻结终端」——终端输入框与发送按钮被禁用，目的是防止人工操作干扰 Modbus 报文时序。返回值里的 terminalFrozen 会标明此状态。用完请及时 deactivate 以恢复终端。\n\n同样重要：**shared 模式下 Modbus 只发得出去、收不回来**。冻结终端读循环与冻结响应解析是同一件事——响应字节会在终端暂停分支处被丢弃，页面因此永远等不到应答。所以凡是需要响应结果的操作（modbus_request、以及轮询的回读）都必须用 independent 模式：先 set_mode 到 independent，再 connect 独立串口。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -67,7 +67,7 @@ function buildTools() {
     },
     {
       name: 'modbus_request',
-      description: '发送一条语义化 Modbus RTU 请求并返回解析后的响应，CRC16 由页面自动计算。\n\n支持的功能码：01 读线圈、02 读离散输入、03 读保持寄存器、04 读输入寄存器、05 写单线圈、06 写单寄存器、15(0F) 写多线圈、16(10) 写多寄存器。\n\n返回值包含：请求与响应的完整 HEX 帧、响应时间、寄存器值（HEX/U16/I16/F32 多种格式）、线圈位图、以及异常码的中文描述。设备超时为 500ms，超时会明确标注。\n\n写操作会直接改变设备状态，请确认目标地址无误。',
+      description: '发送一条语义化 Modbus RTU 请求并返回解析后的响应，CRC16 由页面自动计算。\n\n支持的功能码：01 读线圈、02 读离散输入、03 读保持寄存器、04 读输入寄存器、05 写单线圈、06 写单寄存器、15(0F) 写多线圈、16(10) 写多寄存器。\n\n返回值包含：请求与响应的完整 HEX 帧、响应时间、寄存器值（HEX/U16/I16/F32 多种格式，总是一次给全，无需再用参数指定格式）、线圈位图、以及异常码的中文描述。设备超时为 500ms，超时会明确标注。\n\n**必须在 independent 模式下调用**：shared 模式会冻结终端读循环，响应字节在解析前就被丢弃，本工具只能等到超时。写操作尤其危险——字节真的发到了线缆上，返回值却说"设备没响应"，据此重试就等于重复写。本工具在 shared 模式下会直接拒绝并说明，请先 modbus_control {action:"set_mode", mode:"independent"} 并 connect。\n\n写操作会直接改变设备状态，请确认目标地址无误。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -92,7 +92,7 @@ function buildTools() {
     },
     {
       name: 'ui_action',
-      description: '操作终端界面。action 取值：clear 清屏、pause 暂停显示、resume 继续显示、set_theme（需 theme）、set_font（需 size）、toggle_sidebar 折叠侧栏、run_macro（需 name，执行已保存的宏）、list_macros 列出宏名、save_log 保存终端日志到文件。\n\n注意 pause 只影响显示，不影响串口接收——数据仍会进入缓冲，可用 serial_read 读取。',
+      description: '操作终端界面。action 取值：clear 清屏、pause 暂停显示、resume 继续显示、set_theme（需 theme）、set_font（需 size）、toggle_sidebar 折叠侧栏、run_macro（需 name，执行已保存的宏）、list_macros 列出宏名、save_log 保存终端日志到文件。\n\n警告：pause 期间到达的串口数据会被**直接丢弃**——页面在暂停时连解码器缓冲都不写入，该段字节既不渲染也不进读取缓冲，恢复后 serial_read 的 dropped 仍然是 0（也就是说它不会告诉你丢过东西），无法补读。需要一段不丢数据的观察窗口时，请改用 serial_read 主动拉取，不要 pause。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -141,10 +141,29 @@ function buildTools() {
 
 // ════ 错误翻译 ════
 // 工具结果是文本，模型读的是句子。必须把「该做什么」写进去，只报错误名会让 AI 反复重试。
+
+/**
+ * 页面该从哪里打开：由**实际连接的桥地址**推导，不写死 1982。
+ * 文档支持 PORT=3000 配 WEBTERM_BRIDGE_URL 启动，写死会把用户指向一个没在跑的
+ * 端口——AI 于是让用户去开一个打不开的地址，而真正的页面就在另一个端口上。
+ * （BRIDGE_URL 声明在下方：本函数只在模块求值完成之后被调用，无 TDZ 问题。）
+ */
+const pageOrigin = () => {
+  try {
+    const u = new URL(BRIDGE_URL);
+    return (u.protocol === 'wss:' ? 'https://' : 'http://') + u.host;
+  } catch {
+    return 'http://localhost:1982';
+  }
+};
+
 const ERROR_TEXT = {
   NEEDS_USER_GESTURE: () => '✖ 无法连接：浏览器要求用户手动授权串口（首次连接必须真人点一下页面上的"连接"按钮）。重试不会有帮助——请让用户操作完成后再继续。',
-  PORT_BUSY: (m) => `✖ 串口被占用：${m}\n该物理端口正被另一套串口栈持有。可先用 modbus_control 把模式切到 shared 复用终端端口，或先断开占用方。`,
-  PAGE_NOT_CONNECTED: () => '✖ 页面未连接。请确认用户已在浏览器打开 http://localhost:1982 ，且页面上的桥连接正常。',
+  // 这条文案曾建议"切 Modbus 到 shared 复用终端端口"来腾出串口——那是一条死路：
+  // shared 只让 Modbus 复用终端端口，既解决不了占用，而且 shared 模式下
+  // modbus_request 收不到任何响应（终端读循环被冻结）。改为指向真正的占用方。
+  PORT_BUSY: (m) => `✖ 串口被占用：${m}\n同一物理端口同一时刻只能被一套串口栈持有。请先断开占用方（serial_disconnect，或 modbus_control {action:"disconnect"}）再重试——重试本身不会让它变好。\n不要改用 shared 模式来绕开：它并不释放端口，而且 shared 模式下 modbus_request 收不到响应。`,
+  PAGE_NOT_CONNECTED: () => `✖ 页面未连接。请确认用户已在浏览器打开 ${pageOrigin()} ，且页面上的桥连接正常。`,
   BRIDGE_TIMEOUT: (m) => `✖ 页面响应超时：${m}\n页面可能正忙或已卡死。可先用 webterm_status 判断页面是否还在响应。`,
   PORT_NOT_CONNECTED: (m) => `✖ 串口未连接：${m}\n请先调用 serial_connect。`,
   NOT_ARMED: () => '✖ AI 写入未启用。请让用户在页面上打开"允许 AI 写入"开关后重试。读取类操作（状态、读取输出）不受此限制，随时可用。',
