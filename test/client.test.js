@@ -204,3 +204,45 @@ test('已移除 escapeJs（只转义单引号，易被误用为属性转义）',
   assert.doesNotMatch(html, /function escapeJs/, '不应再保留 escapeJs');
   assert.match(html, /function escapeHtml/, 'escapeHtml 仍被 Modbus 日志使用，应保留');
 });
+
+// ════════════════════════════════════════════════════════
+// 四、串口 seam 回归防护
+//
+// AI 桥的假串口方案依赖"所有串口都经 serialProvider 获取"这条不变式。
+// 后续若有人图省事写回 navigator.serial.requestPort()，这条测试必须立刻变红——
+// 否则假设备会静默失效，测试却依然全绿。
+// ════════════════════════════════════════════════════════
+
+test('navigator.serial 只在 seam 定义处被引用', () => {
+  const hits = html.match(/navigator\.serial\.[A-Za-z]+\s*\(/g) || [];
+  assert.strictEqual(hits.length, 2,
+    '应只有 serialProvider 定义处的 requestPort 与 getPorts，实际: ' + hits.join(' | '));
+});
+
+test('serialProvider 声明为可重新赋值（let，而非 const）', () => {
+  // bridge-client.js 需要在切换假设备时重新赋值，const 会静默失败
+  assert.match(html, /let\s+serialProvider\s*=/, '必须以 let 声明 serialProvider');
+  assert.doesNotMatch(html, /const\s+serialProvider\s*=/, '不能是 const');
+});
+
+test('两处取端口都改走 serialProvider', () => {
+  const connect = extractFn('connectPort');
+  assert.ok(connect, '应存在 connectPort()');
+  assert.match(connect, /serialProvider\.requestPort\(\)/, 'connectPort 必须走 seam');
+
+  const modbusConnect = extractFn('modbusConnectPort');
+  assert.ok(modbusConnect, '应存在 modbusConnectPort()');
+  assert.match(modbusConnect, /serialProvider\.requestPort\(\)/, 'modbusConnectPort 必须走 seam');
+});
+
+test('seam 之外的串口逻辑未被改动', () => {
+  // readLoop 的流式解码器与断点 flush 是既有的正确实现，本次不得触碰
+  const readLoop = extractFn('readLoop');
+  assert.match(readLoop, /stream\s*:\s*true/, '流式解码器不得被改动');
+  assert.strictEqual((readLoop.match(/rxDecoder\.decode\(\);/g) || []).length, 2,
+    '两处断点 flush 不得被改动');
+
+  const disconnect = extractFn('disconnectPort');
+  assert.match(disconnect, /isConnected = false/, '断开必须先置标志位');
+  assert.match(disconnect, /reader\.cancel\(\)/, '断开依赖 cancel 解阻塞 readLoop');
+});

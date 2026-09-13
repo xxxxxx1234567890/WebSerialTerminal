@@ -2936,12 +2936,28 @@ function startTftpUpload() {
   }));
 }
 
+// 串口源。所有端口获取都必须经此——AI 桥的假设备靠重新赋值它来接管（见 bridge-client.js）。
+// 用 let 而非 const：bridge-client.js 需要整体替换。
+// 挂到 window 上是为了让 bridge-client.js（独立 script 块）能引用到真实实现以便切回。
+window.realSerialProvider = {
+  getPorts: () => navigator.serial.getPorts(),
+  // 优先返回已授权端口。这一步是整个自动化的关键：
+  // requestPort() 每次都会弹选择框、且必须由用户手势触发；getPorts() 两者都不需要。
+  // 没有这层优先，AI 在真人授权过一次之后依然无法自动重连。
+  requestPort: async () => {
+    const ports = await realSerialProvider.getPorts();
+    if (ports.length) return ports[0];
+    return navigator.serial.requestPort();   // 确实没有已授权端口时才弹框
+  },
+};
+let serialProvider = window.realSerialProvider;
+
 // ════════════════════════════════════════════════════════
 // SERIAL CONNECTION
 // ════════════════════════════════════════════════════════
 async function connectPort() {
   try {
-    port = await navigator.serial.requestPort();
+    port = await serialProvider.requestPort();
     const baudRate = parseInt(document.getElementById('baudRate').value);
     const dataBits = parseInt(document.getElementById('dataBits').value);
     const stopBits = parseInt(document.getElementById('stopBits').value);
@@ -4677,7 +4693,7 @@ function modbusSetMode(mode) {
 // ════════════════════════════════════════════════════════
 async function modbusConnectPort() {
   try {
-    modbusPort = await navigator.serial.requestPort();
+    modbusPort = await serialProvider.requestPort();
     const baudRate = parseInt(document.getElementById('mbBaudRate').value);
     const dataBits = parseInt(document.getElementById('mbDataBits').value);
     const stopBits = parseInt(document.getElementById('mbStopBits').value);
@@ -4849,5 +4865,8 @@ if ('serviceWorker' in navigator) {
 }
 </script>
 <script src="pwa-install.js"></script>
+<script src="bridge-protocol.js"></script>
+<script src="fake-serial.js"></script>
+<script src="bridge-client.js"></script>
 </body>
 </html>
