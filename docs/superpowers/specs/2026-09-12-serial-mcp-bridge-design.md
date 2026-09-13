@@ -253,7 +253,7 @@ Claude Code ──stdio──► mcp-server.js ──bridge 消息──► brid
 | 错误码 | 含义 | AI 应做什么 |
 |---|---|---|
 | `NEEDS_USER_GESTURE` | 无已授权端口，`requestPort()` 需用户手势 | **停下请用户点击连接按钮**；重试无效 |
-| `PORT_BUSY` | 物理端口被另一套栈占用 | 先断开另一栈，或切 Modbus 至 shared 模式 |
+| `PORT_BUSY` | 物理端口被另一套栈占用 | 先断开占用方（`serial_disconnect` / `modbus_control {action:"disconnect"}`）再重试。**不要**为腾端口把 Modbus 切到 shared——切过去确实会断开独立串口、腾出端口，但终端读循环随之冻结、`modbus_request` 不可用 |
 | `PAGE_NOT_CONNECTED` | 桥上没有页面 | 提示用户打开 `localhost:1982` |
 | `BRIDGE_TIMEOUT` | 页面未在时限内响应 | 检查页面是否卡住 |
 | `PORT_NOT_CONNECTED` | 端口未打开 | 先 `connect` |
@@ -261,6 +261,13 @@ Claude Code ──stdio──► mcp-server.js ──bridge 消息──► brid
 | `INVALID_ARGS` | 参数校验失败 | 修正参数 |
 | `OP_UNSUPPORTED` | 页面能力清单不含该域/操作 | 提示刷新页面 |
 | `PAGE_ERROR` | 页面内部抛错（带 stack） | 转发给用户排查 |
+
+> **修订记录（终审）**：`PORT_BUSY` 行原写"先断开另一栈，**或切 Modbus 至 shared 模式**"。
+> 那条建议的隐含前提是**假的**——切 shared 时 `modbusSetMode` 会调 `modbusDisconnectPort()`
+> （内含 `await modbusPort.close()`），独立串口确实被断开、端口确实腾得出来。不推荐的理由
+> 只剩**不划算**：shared 模式下终端读循环被冻结，Modbus 响应字节在解析前就被丢弃，实现为此
+> **直接拒绝** `modbus_request`（见 §4.3 该行）——切过去等于拿"Modbus 工具不可用"换端口。
+> 工具文案与用户文档已同步此政策。
 
 `NEEDS_USER_GESTURE` 与普通失败必须区分——否则 AI 会陷入重试循环，这是最容易踩的坑。
 
