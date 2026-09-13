@@ -1,6 +1,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { writeToken } = require('./bridge-auth.js');
+const { attachBridge } = require('./bridge.js');
 
 // 仅监听回环地址。本进程具备"把内容写到任意目录"的能力，
 // 绑定全部网卡等于把写盘接口暴露给局域网（Host/Origin 校验只挡浏览器）。
@@ -224,6 +226,28 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`WebTerm Pro running at http://localhost:${server.address().port}`);
+
+  // ── AI 桥 ─────────────────────────────────────────────
+  // 桥与静态服务同生共死：页面能存在就说明本进程在跑，因此不需要额外的常驻进程。
+  // 刻意放在 listen 回调里，而不是模块作用域：端口真的分配成功后才写 token（端口被
+  // 占用时不留下一份永远用不上的 token），并且这条日志严格排在 "running at" 之后——
+  // 测试 harness 靠那一行抓端口，新增日志不得插到它前面。
+  const { token: bridgeToken, filePath: bridgeTokenPath } = writeToken();
+  console.log(`[bridge] token 已写入 ${bridgeTokenPath}`);
+
+  const bridge = attachBridge(server, {
+    token: bridgeToken,
+    // 判定函数由本模块注入，而不是从本模块导出：既不改动既有逻辑，也让桥能脱离
+    // server.js 单测。upgrade 监听由 bridge.js 自己挂，这里不重复实现。
+    isTrustedOrigin,
+    isLocalHostname,
+    hostnameOf,
+    getActualPort: () => (server.address() ? server.address().port : PORT),
+  });
+
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => { bridge.close(); process.exit(0); });
+  }
 }).on('error', err => {
   if (err.code === 'EADDRINUSE') {
     console.error(`端口 ${PORT} 已被占用，请关闭占用进程后重试`);

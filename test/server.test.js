@@ -15,6 +15,7 @@ const TOKEN_HEADER = 'X-WebTerm';
 let child;
 let port;
 let tmpRoot;
+let tmpHome;
 
 // ── 工具 ────────────────────────────────────────────────
 function request(method, urlPath, { headers = {}, body } = {}) {
@@ -66,7 +67,9 @@ function startServer() {
   return new Promise((resolve, reject) => {
     child = spawn(process.execPath, ['server.js'], {
       cwd: APP_DIR,
-      env: { ...process.env, PORT: '0' }, // 0 = 由系统分配空闲端口
+      // WEBTERM_HOME 把 bridge token 定向到临时目录。不设它，writeToken() 会落进
+      // 真实用户主目录（bridge-auth.js 的默认值是 os.homedir()）——测试污染真实环境。
+      env: { ...process.env, PORT: '0', WEBTERM_HOME: tmpHome }, // 0 = 由系统分配空闲端口
     });
     let out = '';
     const timer = setTimeout(() => reject(new Error('服务器启动超时:\n' + out)), 10000);
@@ -82,12 +85,14 @@ function startServer() {
 
 before(async () => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-test-'));
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-home-'));
   port = await startServer();
 });
 
 after(() => {
   if (child) child.kill();
   if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true });
+  if (tmpHome) fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
 // ── 用例 ────────────────────────────────────────────────
@@ -285,7 +290,9 @@ test('客户端生成的文件名能通过服务端校验（端到端接缝）',
 test('非法 PORT 环境变量应给出明确错误而不是裸堆栈', async () => {
   const { spawn } = require('node:child_process');
   const child = spawn(process.execPath, ['server.js'], {
-    cwd: APP_DIR, env: { ...process.env, PORT: 'not-a-number' },
+    // WEBTERM_HOME 同样必设：这条路径今天在端口校验处就退出了（早于写 token），
+    // 但"任何启动 server.js 的地方都得设"这条规矩不能依赖执行顺序
+    cwd: APP_DIR, env: { ...process.env, PORT: 'not-a-number', WEBTERM_HOME: tmpHome },
   });
   let out = '';
   child.stdout.on('data', c => (out += c));
@@ -294,4 +301,95 @@ test('非法 PORT 环境变量应给出明确错误而不是裸堆栈', async ()
   assert.strictEqual(code, 1, '应以退出码 1 结束');
   assert.match(out, /端口配置无效/, '应打印明确提示，实际: ' + out);
   assert.doesNotMatch(out, /ERR_SOCKET_BAD_PORT/, '不应抛裸堆栈');
+});
+
+// ── AI 桥的挂载（server.js 只挂载，不重复实现桥的逻辑） ──────
+
+test('启动时写入桥 token，供 mcp-server.js 读取', async () => {
+  // 用 tmpHome 而不是 process.env.WEBTERM_HOME：后者只设在了子进程的 env 里，
+  // 测试进程自身的 env 并没有这个变量
+  const tokenFile = path.join(tmpHome, '.webterm', 'bridge-token');
+  assert.ok(fs.existsSync(tokenFile), '应写入 ' + tokenFile);
+  assert.match(fs.readFileSync(tokenFile, 'utf8'), /^[0-9a-f]{64}$/);
+});
+
+test('/bridge 拒绝非法 Origin 的升级请求', async () => {
+  const WebSocket = require('ws');
+  // 有界 + 失败即处置。若拒绝逻辑被破坏、连接被错误接受，被泄漏的客户端 socket
+  // 会吊住测试进程的事件循环，而 npm test 不带 --test-timeout —— 那就是无限挂起。
+  // 与 Task 4 那个 180s 挂死同类，只是发生在客户端侧。
+  let leaked = null;
+  try {
+    await assert.rejects(
+      () => new Promise((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/bridge`, { origin: 'http://evil.example.com' });
+        // 计时器必须 unref：否则每次『通过』的运行也要多等满 2 秒
+        const timer = setTimeout(() => reject(new Error('升级既未成功也未在 2s 内被拒')), 2000);
+        timer.unref();
+        ws.on('open', () => { clearTimeout(timer); leaked = ws; resolve(ws); });
+        ws.on('error', e => { clearTimeout(timer); reject(e); });
+        ws.on('unexpected-response', (_r, res) => { clearTimeout(timer); reject(new Error('HTTP ' + res.statusCode)); });
+      }),
+      /HTTP 403/
+    );
+  } finally {
+    if (leaked) leaked.terminate();   // 失败路径必须先处置再向上抛，否则进程挂住
+  }
+});
+
+test('/bridge 接受合法 Origin 的升级请求，并按桥的协议应答', async () => {
+  // 上面那条只证明"会被拒"。没有这条，一个根本没挂载桥的 server.js（升级直接断链、
+  // 客户端报 socket hang up）也可能骗过拒绝断言——所以必须证明通路真的通到桥上。
+  const WebSocket = require('ws');
+  let ws = null;
+  try {
+    ws = await new Promise((resolve, reject) => {
+      const sock = new WebSocket(`ws://127.0.0.1:${port}/bridge`, { origin: `http://localhost:${port}` });
+      const timer = setTimeout(() => reject(new Error('2s 内未完成升级')), 2000);
+      timer.unref();
+      sock.on('open', () => { clearTimeout(timer); resolve(sock); });
+      sock.on('error', e => { clearTimeout(timer); reject(e); });
+      sock.on('unexpected-response', (_r, res) => { clearTimeout(timer); reject(new Error('HTTP ' + res.statusCode)); });
+    });
+
+    // 页面未连上时发请求，桥应立刻回 PAGE_NOT_CONNECTED —— 这句应答只有真桥会发
+    const answer = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('2s 内未收到桥的应答')), 2000);
+      timer.unref();
+      ws.on('message', d => { clearTimeout(timer); resolve(JSON.parse(d.toString())); });
+    });
+    ws.send(JSON.stringify({ id: 't6-req-1', kind: 'req', domain: 'port', op: 'list', args: {} }));
+
+    const msg = await answer;
+    assert.strictEqual(msg.id, 't6-req-1');
+    assert.strictEqual(msg.kind, 'res');
+    assert.strictEqual(msg.ok, false, '页面未连接，不应成功');
+    assert.strictEqual(msg.error && msg.error.code, 'PAGE_NOT_CONNECTED');
+  } finally {
+    if (ws) ws.terminate();
+  }
+});
+
+test('/bridge 拒绝伪造 Host 的升级请求（DNS rebinding 防线仍接线正确）', async () => {
+  // Origin 保持合法，于是唯一的拒绝来源只可能是注入的 isLocalHostname
+  const WebSocket = require('ws');
+  let leaked = null;
+  try {
+    await assert.rejects(
+      () => new Promise((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/bridge`, {
+          origin: `http://localhost:${port}`,
+          headers: { Host: 'evil.example.com' },
+        });
+        const timer = setTimeout(() => reject(new Error('升级既未成功也未在 2s 内被拒')), 2000);
+        timer.unref();
+        ws.on('open', () => { clearTimeout(timer); leaked = ws; resolve(ws); });
+        ws.on('error', e => { clearTimeout(timer); reject(e); });
+        ws.on('unexpected-response', (_r, res) => { clearTimeout(timer); reject(new Error('HTTP ' + res.statusCode)); });
+      }),
+      /HTTP 403/
+    );
+  } finally {
+    if (leaked) leaked.terminate();
+  }
 });
