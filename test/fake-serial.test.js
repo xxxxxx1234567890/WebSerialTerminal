@@ -4,6 +4,7 @@ const assert = require('node:assert');
 const { FakeScript, FakeSerialPort } = require('../fake-serial.js');
 
 const sync = fn => fn(); // 同步调度器：让规则延迟不引入计时器抖动
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 test('open 后 readable/writable 才可获取', async () => {
   const p = new FakeSerialPort();
@@ -124,6 +125,25 @@ test('规则命中后经 schedule 回注到 readable', async () => {
   const w = p.writable.getWriter();
   await w.write(new Uint8Array([0x01, 0x03]));
   assert.deepStrictEqual((await reader.read()).value, new Uint8Array([0x01, 0x03, 0x02, 0x00, 0x64]));
+});
+
+test('默认调度器（真实 setTimeout）在 delayMs 后回注', async () => {
+  // 唯一让非零 delayMs 走端口默认调度器的测试。其余端口级规则测试都注入同步调度器，
+  // 若默认 setTimeout 被删掉或接错，生产里所有规则响应会静默永不触发而它们照样全绿。
+  // 刻意不传 schedule。
+  const p = new FakeSerialPort({
+    rules: [{ matchHex: '0103', respondHex: '0103020064', delayMs: 5 }],
+  });
+  await p.open({});
+  const reader = p.readable.getReader();
+  const w = p.writable.getWriter();
+  await w.write(new Uint8Array([0x01, 0x03]));
+
+  await sleep(30); // 真实计时器：等 5ms 的定时器到期，证明回注是"延时"而非"同步塞入"
+  // 有界等待：默认调度器失效时立刻失败并说明原因，而不是把整个文件挂到超时。
+  const raced = await Promise.race([reader.read(), sleep(200).then(() => 'no-response')]);
+  assert.notStrictEqual(raced, 'no-response', '默认调度器未在 200ms 内回注响应');
+  assert.deepStrictEqual(raced.value, new Uint8Array([0x01, 0x03, 0x02, 0x00, 0x64]));
 });
 
 test('setRules 可运行中替换规则', async () => {
