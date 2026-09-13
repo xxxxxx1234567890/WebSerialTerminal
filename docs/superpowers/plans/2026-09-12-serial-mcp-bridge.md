@@ -2822,7 +2822,9 @@ const BRIDGE_URL = process.env.WEBTERM_BRIDGE_URL || 'ws://127.0.0.1:1982/bridge
 
 /** 与桥的长连接。断线自动重连；连不上时请求立即失败而不是永久挂起。 */
 function createBridgeClient() {
-  const state = { ws: null, seq: 0, pending: new Map(), retryMs: 500 };
+  const state = { ws: null, seq: 0, pending: new Map(), retryMs: 500,
+                  // 每个适配器进程一个随机标签，用于保证请求 id 全局唯一
+                  tag: require('node:crypto').randomBytes(4).toString('hex') };
 
   function ensure() {
     if (state.ws && state.ws.readyState === 1) return Promise.resolve(state.ws);
@@ -2867,7 +2869,12 @@ function createBridgeClient() {
   return {
     async request(domain, op, args) {
       const ws = await ensure();
-      const id = `r-${++state.seq}`;
+      const id = `${state.tag}-${++state.seq}`;
+      // id 必须【全局】唯一，不是"适配器内唯一"：桥的请求表是全桥共享的一张 map，
+      // 而多个 Claude Code 会话各起一个适配器、各自从 1 开始编号 —— 必然撞车。
+      // 撞车的后果是静默摧毁活跃请求：孤儿计时器、把 BRIDGE_TIMEOUT 误发给第二个
+      // 请求者、页面的 res 只回给最后写入者而第一个请求者永远收不到。
+      // 桥侧另有冲突守卫作纵深防御，但正确的修法是在源头保证唯一。
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           state.pending.delete(id);
