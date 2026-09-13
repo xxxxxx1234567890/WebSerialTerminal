@@ -180,6 +180,13 @@ async function dispatchTool(name, args, request) {
     return { content: [{ type: 'text', text: `✖ 未知工具: ${name}` }], isError: true };
   }
   const [domain, op, payload] = mapper(args || {});
+  // dev_serial 从 args.action 推导 op：缺参时 op 是 undefined，请求会带着
+  // "dev.undefined" 上路，页面只能回 OP_UNSUPPORTED，而那句翻译会建议
+  // "请让用户刷新页面"——把调用方的参数错误诊断成了页面版本问题。本地拦住，
+  // 让模型看到的是自己少传了参数。
+  if (typeof op !== 'string' || op === '') {
+    return { content: [{ type: 'text', text: `✖ 缺少 action 参数：${name}` }], isError: true };
+  }
   try {
     const res = await request(domain, op, payload);
     if (!res || res.ok !== true) {
