@@ -1,8 +1,12 @@
 // test/mcp-tools.test.js
 const { test } = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const M = require('../mcp-server.js');
 const P = require('../bridge-protocol.js');
+
+const SERVER_SRC = path.join(__dirname, '..', 'mcp-server.js');
 
 test('工具清单数量与命名稳定', () => {
   const names = M.buildTools().map(t => t.name);
@@ -57,10 +61,15 @@ test('dispatchTool 把工具名映射到正确的桥操作', async () => {
   assert.deepStrictEqual(calls[3], ['dev', 'fake_inject', { action: 'fake_inject', data: '41' }]);
 });
 
-test('dispatchTool 对未知工具名返回 INVALID_ARGS 而非抛错', async () => {
+// 名字即断言：这里钉的是"本地分发失败，不抛错，且报出是哪个工具"，
+// 而不是 INVALID_ARGS 的翻译——未知工具名是本地的分发失败，不是桥的错误码，
+// 名字若谎报成 INVALID_ARGS，后来者会以为已有覆盖而不再补。
+test('dispatchTool 对未知工具名返回错误文本且不抛错', async () => {
   const r = await M.dispatchTool('nope', {}, async () => P.makeRes('x', {}));
   assert.strictEqual(r.isError, true);
-  assert.match(r.content[0].text, /nope/);
+  assert.match(r.content[0].text, /nope/, '错误文本必须报出是哪个工具名，否则模型无从纠正');
+  assert.ok(!r.content[0].text.includes(P.ERROR_CODES.INVALID_ARGS),
+    '未知工具名属本地分发失败，不该谎报成桥的 INVALID_ARGS');
 });
 
 test('dispatchTool 把桥的错误码翻译成自然语言', async () => {
@@ -81,4 +90,41 @@ test('dispatchTool 成功时返回 JSON 文本内容', async () => {
 test('serial_read 的默认行数来自协议常量而非硬编码', () => {
   const t = M.buildTools().find(x => x.name === 'serial_read');
   assert.strictEqual(t.inputSchema.properties.max.default, P.READ_DEFAULT_LINES);
+});
+
+// ════════════════════════════════════════════════════════
+// 结构性断言（源码级）——锁死"错误码常量不被写成字面量"
+// ════════════════════════════════════════════════════════
+// 为什么非做源码级断言不可：ERROR_CODES 的键与值同名，把
+// P.ERROR_CODES.PAGE_ERROR 改回 'PAGE_ERROR' 行为完全一致，任何行为断言都
+// 抓不到；而一旦协议里改了名，字面量不会跟着走，translateError 会查不到而
+// 静默退化成兜底文案。这与 client.test.js 用源码级断言锁死修复是同一手法。
+
+const serverSrc = fs.readFileSync(SERVER_SRC, 'utf8');
+
+/** 按大括号配对提取函数体（模板字面量里的 ${ } 会自然抵消） */
+function extractFn(name) {
+  const start = serverSrc.indexOf('function ' + name + '(');
+  if (start < 0) return '';
+  const open = serverSrc.indexOf('{', start);
+  let depth = 0;
+  for (let i = open; i < serverSrc.length; i++) {
+    if (serverSrc[i] === '{') depth++;
+    else if (serverSrc[i] === '}') { depth--; if (!depth) return serverSrc.slice(start, i + 1); }
+  }
+  return '';
+}
+
+test('兜底错误码取自 P.ERROR_CODES 而非字符串字面量', () => {
+  const body = extractFn('dispatchTool');
+  assert.ok(body, '应能提取到 dispatchTool 的函数体，否则本断言形同虚设');
+
+  assert.match(body, /P\.ERROR_CODES\.PAGE_ERROR/, '兜底码必须引用 P.ERROR_CODES.PAGE_ERROR');
+  assert.ok(!/['"]PAGE_ERROR['"]/.test(serverSrc), "源码中不得出现 'PAGE_ERROR' 字面量");
+
+  // 函数体内不得出现任何 SCREAMING_SNAKE_CASE 字符串字面量：该形状在本文件里
+  // 只可能是错误码，而错误码必须来自 bridge-protocol.js。
+  const literals = body.match(/'[^']*'|"[^"]*"/g) || [];
+  const screaming = literals.filter(s => /^['"][A-Z][A-Z0-9_]{2,}['"]$/.test(s));
+  assert.deepStrictEqual(screaming, [], '出现硬编码的错误码字面量: ' + screaming.join(', '));
 });

@@ -183,13 +183,15 @@ async function dispatchTool(name, args, request) {
   try {
     const res = await request(domain, op, payload);
     if (!res || res.ok !== true) {
-      const code = (res && res.error && res.error.code) || 'PAGE_ERROR';
+      // 兜底码取自协议常量而非字面量：写成字面量的话，ERROR_CODES 一旦改名，
+      // 这两处不会跟着走，translateError 会查不到而静默退化成兜底文案。
+      const code = (res && res.error && res.error.code) || P.ERROR_CODES.PAGE_ERROR;
       const message = (res && res.error && res.error.message) || '无响应';
       return { content: [{ type: 'text', text: translateError(code, message) }], isError: true };
     }
     return { content: [{ type: 'text', text: JSON.stringify(res.data, null, 2) }] };
   } catch (e) {
-    return { content: [{ type: 'text', text: translateError('PAGE_ERROR', e.message) }], isError: true };
+    return { content: [{ type: 'text', text: translateError(P.ERROR_CODES.PAGE_ERROR, e.message) }], isError: true };
   }
 }
 
