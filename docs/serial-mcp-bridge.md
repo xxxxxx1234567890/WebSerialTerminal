@@ -68,7 +68,13 @@ claude
 - `args` 是相对路径，Claude Code 在**项目根目录**下拉起它，因此请从本目录启动 `claude`。
 - 首次连接时 Claude Code 会弹一次「是否信任此项目的 MCP 服务器」，需选允许。
 - 多个 Claude Code 会话会各起一个 `mcp-server.js` 进程，互不冲突（请求 ID 全局唯一）。
-- **`mcp-server.js` 启动时读不到 token 会立即报错**，不会静默重试——请确认 `npm start` 已经跑起来了。
+- **`mcp-server.js` 启动时不做 token 检查。** 没有 token 它照样启动、照样应答「列工具」，
+  失败要到**第一次工具调用**才浮现（返回「读不到桥 token（…）。请先启动 server.js（npm start）。」）。
+  所以 **「MCP 服务器连上了」不等于「token 没问题」**——第一次真正收发之前，
+  请确认 `npm start` 已经跑起来了。
+- token 每次 `npm start` **重新生成**，但**不需要为此重启 Claude Code**：适配器每次建连
+  都重读 token 文件，`server.js` 重启后下一次调用会自动用新 token 连上。
+  （前提是同一时刻只有一个 `server.js` 在写这个文件，见 §7.1。）
 
 用 `/mcp` 可以确认 `webterm-serial` 已连接、能看到 11 个工具。
 
@@ -137,9 +143,9 @@ ui.inspect, ui.list_macros, dev.fake_capture
 
 ```jsonc
 { "rules": [
-    { "matchHex": "0103000000",   // TX 累积缓冲的前缀匹配（hex，按字节比较）
-      "respondHex": "0103030064000a", // 命中后回注的 RX 字节
-      "delayMs": 20 }             // 回注延迟，用来测超时边界
+    { "matchHex": "0103000000",       // TX 累积缓冲的前缀匹配（hex，按字节比较）
+      "respondHex": "0103020064b9af", // 命中后回注的 RX 字节（完整帧，含 CRC）
+      "delayMs": 20 }                 // 回注延迟，用来测超时边界
 ] }
 ```
 
@@ -153,16 +159,23 @@ ui.inspect, ui.list_macros, dev.fake_capture
 典型闭环（全程无硬件）：
 
 ```text
-1. dev_serial {action:"serial_source", mode:"fake"}          → {source:"fake"}
+1. dev_serial {action:"serial_source", mode:"fake"}            → {source:"fake"}
 2. dev_serial {action:"fake_script", rules:[{matchHex:"0103000000",
-               respondHex:"0103030064000a", delayMs:20}]}     → {ruleCount:1}
+               respondHex:"0103020064b9af", delayMs:20}]}      → {ruleCount:1}
 3. serial_connect                                              → {connected:true}
-4. serial_send  {data:"01030000000A", encoding:"hex"}          → {bytesWritten:6}
-5. dev_serial  {action:"fake_capture"}                         → {hex:"01030000000a"}
+4. serial_send  {data:"010300000001840a", encoding:"hex"}      → {bytesWritten:8}
+5. dev_serial  {action:"fake_capture"}                         → {hex:"010300000001840a"}
 6. serial_read {cursor:0}                                      → 出现假设备回注的响应行
 ```
 
-> 第 2 步的 `respondHex` 必须是**完整的 Modbus 响应帧**（从站号 + 功能码 + 数据 + CRC），假设备原样回注，页面侧会照常做 CRC 校验。
+第 4 步发的是 `01 03 00 00 00 01 84 0a`：从站 1、功能码 03、起始地址 0、
+读 1 个寄存器，尾两字节 `84 0a` 是 CRC。第 2 步的 `matchHex` 只比前 5 字节
+`01 03 00 00 00`，所以请求里加不加 CRC 都能命中。
+
+> 第 2 步的 `respondHex` 应当是**完整的 Modbus 响应帧**（从站号 + 功能码 + 字节数 +
+> 数据 + CRC，**CRC 低字节在前**）。假设备只是把字节原样回注：`serial_read` 那条路径
+> 只负责显示、不校验 CRC，但同一帧若走 Modbus 面板或 `modbus_request`，页面会按标准
+> 校验 CRC——帧写全了两种用法都对。
 
 ---
 
@@ -195,13 +208,20 @@ AI 拿到的不是裸错误码，而是翻译过的人话。下表是对照：
 | 位置 | Windows `C:\Users\<你>\.webterm\bridge-token`，其他平台 `~/.webterm/bridge-token` |
 | 覆盖 | 环境变量 `WEBTERM_HOME` 指向别处时，改为 `%WEBTERM_HOME%\.webterm\bridge-token` |
 | 内容 | 64 个十六进制字符（32 字节随机数） |
-| 生命周期 | **每次 `server.js` 启动重新生成**，不持久化；重启即失效 |
+| 生命周期 | **每次 `server.js` 启动重新生成**，不持久化；但适配器每次建连都重读它，所以重启服务端**不需要**同时重启 Claude Code |
 | 权限 | 目录 `0o700`、文件 `0o600`（Windows 上由 Node 尽力而为，实际依赖用户目录 ACL） |
 
 它**不在仓库里**，`.gitignore` 另外补了一条 `.webterm/` 作防御性忽略。
 
 - 报错 `读不到桥 token（…）。请先启动 server.js（npm start）。` → 服务端没起，或 `WEBTERM_HOME` 与启动 `server.js` 时不一致。
-- `token 无效` → 服务端重启过（token 换了），但 `mcp-server.js` 还拿着旧的。重启 Claude Code 会话即可。
+- `token 无效`（表现为适配器侧 `无法连接桥… Unexpected server response: 403`）→
+  **磁盘上的 token 文件与「正在运行的那个服务器」内存里的 token 不一致**。
+
+  适配器每次建连都重读文件，**不存在"适配器存着旧 token"这回事**——所以重启 Claude Code
+  只会读到同一个文件、以完全相同的方式再失败一次。真正的成因是**有第二个 `server.js`
+  在跑并重写了这个文件**（典型是另开了一个用别的端口、但 `WEBTERM_HOME` 相同的实例）。
+  补救办法是**确保只有一个服务器拥有这个 token 文件**：杀掉多余的那个，再重启 `server.js`
+  （见 §7.2）。
 
 ### 7.2 端口占用
 
@@ -265,7 +285,9 @@ PORT=3000 npm start
 
 - 页面会自动重连（指数退避，1s → 30s 封顶），**不弹错、不卡 UI**。
 - 「允许 AI 写入」的勾选状态仍在（存在 localStorage）。
-- 但 **token 会重新生成**，所以 `mcp-server.js` 持有的旧连接会失效——重启 Claude Code 会话最干净。
+- **token 会重新生成，但不必重启 Claude Code**：适配器每次建连都重读 token 文件，
+  旧连接断开后下一次调用会自动拿新 token 连上（实测：服务端换掉后第一次调用即恢复，
+  全程无 token 相关报错）。前提仍是 §7.1 那条——同一时刻只有一个 `server.js` 在写这个文件。
 
 ---
 

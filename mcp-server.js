@@ -198,6 +198,14 @@ async function dispatchTool(name, args, request) {
     }
     return { content: [{ type: 'text', text: JSON.stringify(res.data, null, 2) }] };
   } catch (e) {
+    // 建连类失败（缺 token / server.js 没起 / 桥断开）自带完整的补救指引，而且
+    // 根本不是"页面内部"的错误：套上 PAGE_ERROR 会追加"这通常是 WebTerm 自身的
+    // 缺陷"，于是同一条消息里既有正确的补救步骤、又有自相矛盾的归因。原文透出。
+    // 注意这里不走 translateError：页面的 message 是诊断信息，建连的 message 是
+    // 给用户的指令，两者形状不同，不该共用同一套包装。
+    if (e && e.bridgeUnavailable) {
+      return { content: [{ type: 'text', text: '✖ ' + e.message }], isError: true };
+    }
     return { content: [{ type: 'text', text: translateError(P.ERROR_CODES.PAGE_ERROR, e.message) }], isError: true };
   }
 }
@@ -210,6 +218,15 @@ const SERVER_NAME = 'webterm-serial-bridge';
 const SERVER_VERSION = '1.0.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';
 const BRIDGE_URL = process.env.WEBTERM_BRIDGE_URL || 'ws://127.0.0.1:1982/bridge';
+
+/**
+ * 与桥"建立/恢复连接"这一环节的失败：缺 token、server.js 没起、桥断开。
+ *
+ * 与页面内部错误区别对待，是因为两者的 message 形状不同：页面的 message 是诊断
+ * 信息（需要 translateError 包装成人话），而这里的 message 本身就是给用户的
+ * 补救指令。套上 PAGE_ERROR 会追加"这通常是 WebTerm 自身的缺陷"，与原文自相矛盾。
+ */
+const bridgeDown = msg => Object.assign(new Error(msg), { bridgeUnavailable: true });
 
 /** 与桥的长连接。断线自动重连；连不上时请求立即失败而不是永久挂起。 */
 function createBridgeClient() {
@@ -242,12 +259,15 @@ function createBridgeClient() {
   function connect() {
     return new Promise((resolve, reject) => {
       let token;
-      try { token = readToken(); } catch (e) { reject(e); return; }
+      // 每次建连都重读 token 文件，不在进程内缓存——server.js 重启后 token 会变，
+      // 缓存会让适配器拿着已失效的旧值反复被拒。读失败是部署问题（服务端没起 /
+      // WEBTERM_HOME 指错），原文已是可操作指引，故原样透出。
+      try { token = readToken(); } catch (e) { reject(bridgeDown(e.message)); return; }
 
       const ws = new WebSocket(BRIDGE_URL, { headers: { 'x-webterm-token': token } });
       const timer = setTimeout(() => {
         try { ws.terminate(); } catch {}
-        reject(new Error(`连接桥超时（${BRIDGE_URL}）。请确认 server.js 已启动。`));
+        reject(bridgeDown(`连接桥超时（${BRIDGE_URL}）。请确认 server.js 已启动。`));
       }, 3000);
       // 本项目反挂死标准：有界等待计时器一律 unref，否则连不上桥时它会独自
       // 拖着事件循环 3 秒，`node --test` 又没有 --test-timeout，挂起是无界的。
@@ -276,7 +296,7 @@ function createBridgeClient() {
         // 下一个请求再建 C，B 沦为真正的孤儿，它关闭时又去弄挂 C）。
         if (state.ws === ws) state.ws = null;
         if (!state.ws) {
-          for (const [, p] of state.pending) p.reject(new Error('桥连接已断开'));
+          for (const [, p] of state.pending) p.reject(bridgeDown('桥连接已断开'));
           state.pending.clear();
           // 重连只能排在这里：它的条件是"当前没有可用连接"。首次连不上桥时该
           // socket 从未 open、state.ws 恒为 null——若改写成像
@@ -296,7 +316,7 @@ function createBridgeClient() {
       });
       ws.on('error', err => {
         clearTimeout(timer);
-        reject(new Error(`无法连接桥（${BRIDGE_URL}）：${err.message}。请确认 server.js 已启动。`));
+        reject(bridgeDown(`无法连接桥（${BRIDGE_URL}）：${err.message}。请确认 server.js 已启动。`));
       });
     });
   }
