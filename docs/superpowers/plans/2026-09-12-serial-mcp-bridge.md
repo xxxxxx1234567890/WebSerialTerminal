@@ -2754,6 +2754,10 @@ module.exports = { buildTools, dispatchTool, translateError, TOOL_MAP };
 >
 > 不推荐 shared 的真实理由与"释不释放端口"无关：shared 会冻结终端读循环，`modbus_request` 随之不可用（守卫见 `bridge-client.js:566-577`）。**以已交付的文案为准**——照抄上面那段会把这条假话重新引入。
 
+> **注意：上面 `modbus_request` 的返回值承诺与已交付版本不同。** 其中的"寄存器值（HEX/U16/I16/F32 多种格式）、线圈位图"**从未实现过**——不是滞后于实现，而是写成时就是假的。该工具成功时只返回请求与响应的原始帧 `txHex` / `rxHex`，外加 `pduHex`、`responseTimeMs`、`slaveId`、`funcCode`、`outcome`（见 `bridge-client.js:652-671`），**寄存器的解码是调用方的活**。多格式渲染只存在于页面的 DOM 表格（`WebSerialTerminal.html:4401`），MCP 工具并不透出。
+>
+> 该段承诺已在 `mcp-server.js` 的工具描述、`docs/serial-mcp-bridge.md`、`docs/serial-mcp-bridge-usage.md` 与设计 spec 中更正。**以已交付的文案为准**——照抄上面那段会把这条假话重新引入。
+
 > 注意：`dev_serial` 的映射把整个 `args`（含 `action`）作为 payload 传出，因为页面侧按 `dev.<action>` 分派。页面 dispatcher（Task 8）里的 `dev.serial_source` / `dev.fake_inject` / `dev.fake_capture` / `dev.fake_script` 与此一一对应。
 
 - [ ] **Step 4: 运行测试确认通过**
