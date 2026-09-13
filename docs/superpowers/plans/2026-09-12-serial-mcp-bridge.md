@@ -2754,8 +2754,8 @@ module.exports = { buildTools, dispatchTool, translateError, TOOL_MAP };
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `node --test test/mcp-tools.test.js`
-Expected: PASS（全部 11 个 test）
+Run: `node --test --test-timeout=15000 test/mcp-tools.test.js`
+Expected: PASS（10 个 test）
 
 - [ ] **Step 5: 提交**
 
