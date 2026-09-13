@@ -1540,6 +1540,8 @@ git commit -m "feat: server.js 挂载 AI 桥并生成会话 token"
 
 - [ ] **Step 1: 写失败测试**
 
+> **注意：实际交付的断言强于下面的片段。** Task 7 审查发现下方那条计数断言**过度声明**——计数在改动前后都是 2，故"完整回退"（seam 整段删除、两调用点写回直调）同样得到 2，它单独看不出来。实现者按建议将其加强为：先锚定 seam 块（`indexOf('window.realSerialProvider')` → `assert.ok(a > 0)`，再切到 `let serialProvider = window.realSerialProvider;`），然后同时断言 `inSeam.length === 2` **且** `hits.length === inSeam.length`（seam 外零直调），并用 4 个变异 HTML 验证：现状绿、净增一处直调红、**seam 被掏空红**、**完整回退红**——后两者旧断言抓不到。**以实际交付的版本为准。**
+
 在 `test/client.test.js` 末尾追加：
 
 ```js
