@@ -346,6 +346,28 @@
 
   .sidebar-content { padding: 8px; }
 
+  /* AI 写入开关。默认关闭：AI 能连上、能读状态，但要动串口必须由人显式开启。
+     提示文字用独立元素而非 title，因为它的状态变化本身就是信息。 */
+  .ai-armed {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .ai-armed input { accent-color: var(--accent); cursor: pointer; margin: 0; }
+
+  .ai-armed-hint {
+    display: block;
+    margin-top: 5px;
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+  }
+
   /* Quick sends */
   .macro-list { display: flex; flex-direction: column; gap: 4px; }
 
@@ -2188,6 +2210,18 @@
       </div>
     </div>
 
+    <!-- AI 控制（武装开关） -->
+    <div class="sidebar-section">
+      <div class="sidebar-title">◈ AI 控制</div>
+      <div class="sidebar-content">
+        <label class="ai-armed">
+          <input type="checkbox" id="aiArmedToggle">
+          <span>允许 AI 写入</span>
+        </label>
+        <span id="aiArmedHint" class="ai-armed-hint">AI 只读</span>
+      </div>
+    </div>
+
     <!-- Macros -->
     <div class="sidebar-section" style="flex:1; overflow-y:auto;">
       <div class="sidebar-title">⚡ 快捷指令</div>
@@ -3510,6 +3544,10 @@ function appendLine(type, text, autoScroll = true) {
   // Update status bar
   document.getElementById('statusLines').textContent = `LINES: ${lineCount}`;
   document.getElementById('statLines').textContent = rxLines;
+
+  // 灌进 AI 桥的环形缓冲：AI 读到的必须是这里真实渲染过的行
+  // （含 ANSI 解析前原文与 HEX 视图的拼装结果），而不是另一条并行的数据通路
+  if (window.bridgeNoteOutput) window.bridgeNoteOutput(text);
 }
 
 function clearTerminal() {

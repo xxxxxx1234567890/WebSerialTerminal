@@ -262,3 +262,94 @@ test('seam 之外的串口逻辑未被改动', () => {
   assert.match(disconnect, /isConnected = false/, '断开必须先置标志位');
   assert.match(disconnect, /reader\.cancel\(\)/, '断开依赖 cancel 解阻塞 readLoop');
 });
+
+// ════════════════════════════════════════════════════════
+// 五、AI 桥依赖的页面函数必须都存在
+//
+// bridge-client.js 通过全局函数名驱动页面。名字一旦漂移，
+// 对应的 MCP 工具会退化成"永远超时"，比直接报错更难排查。
+// ════════════════════════════════════════════════════════
+
+const BRIDGE_REQUIRED_API = [
+  'connectPort', 'disconnectPort', 'clearTerminal', 'togglePause', 'toggleSidebar',
+  'sendData', 'saveLog', 'applySettings', 'saveState', 'appendLine',
+  'modbusSetMode', 'modbusConnectPort', 'modbusDisconnectPort', 'modbusToggleActive',
+  'modbusStartCycle', 'modbusStopCycle', 'modbusSend', 'modbusConstructFrame',
+  'modbusShowResponse', 'modbusAddLog', 'modbusParseAddress', 'modbusViewSyncAddrMode',
+];
+
+test('AI 桥依赖的页面全局函数全部存在', () => {
+  const missing = BRIDGE_REQUIRED_API.filter(n => !new RegExp(`function\\s+${n}\\s*\\(`).test(html));
+  assert.deepStrictEqual(missing, [], '以下函数被重命名或删除，AI 桥会静默失效: ' + missing.join('、'));
+});
+
+test('Modbus 结果截获点存在（modbus.request 依赖它们）', () => {
+  // 这两个函数被 bridge-client.js 包装以截获解析结果；
+  // 它们消失会让 modbus.request 每次都要等到 1500ms 超时
+  assert.match(html, /function\s+modbusShowResponse\s*\(/, 'modbusShowResponse 是成功/异常/CRC 错误的截获点');
+  assert.match(html, /function\s+modbusAddLog\s*\(/, 'modbusAddLog 是超时结局的唯一截获点');
+});
+
+test('宏对象结构为 {label, cmd}（AI 的 run_macro 依赖此形状）', () => {
+  const fn = extractFn('addMacro');
+  assert.match(fn, /label\s*:/, '宏应有 label 字段');
+  assert.match(fn, /cmd\s*:/, '宏应有 cmd 字段');
+});
+
+test('settings 主题字段名为 colorTheme（ui.action set_theme 依赖）', () => {
+  const m = html.match(/let settings = \{[\s\S]*?\};/);
+  assert.ok(m, '应能提取到 settings 对象');
+  assert.match(m[0], /colorTheme\s*:/, 'settings 应含 colorTheme（不是 theme）');
+  assert.match(m[0], /fontSize\s*:/, 'settings 应含 fontSize');
+});
+
+test('HEX 显示开关是 #chkHex 复选框（ui.inspect 依赖）', () => {
+  // 注意与 #chkHexInput 区分：后者管输入模式，前者管显示模式
+  assert.match(html, /id="chkHex"/, '应存在 #chkHex（显示模式）');
+  assert.match(html, /id="chkHexInput"/, '应存在 #chkHexInput（输入模式）');
+});
+
+// ════════════════════════════════════════════════════════
+// 六、AI 桥的接线（武装开关 / 输出钩子 / 脚本加载）
+// ════════════════════════════════════════════════════════
+
+test('appendLine 末尾把渲染后的文本灌进桥的环形缓冲', () => {
+  // 必须在末尾追加：AI 读到的应是"真实渲染过的那一行"，
+  // 位置若提前，HEX 视图拼装与 ANSI 解析的结果就取不到了
+  const fn = extractFn('appendLine');
+  assert.ok(fn, '应能提取到 appendLine()');
+  const iHook = fn.indexOf('bridgeNoteOutput');
+  const iStatus = fn.indexOf("getElementById('statusLines')");
+  assert.ok(iStatus > 0, '应能定位到先于钩子的状态栏更新');
+  assert.ok(iHook > iStatus, '钩子必须追加在函数末尾（状态栏更新之后）');
+  assert.match(fn.slice(iHook), /bridgeNoteOutput\(text\)/,
+    '钩子必须传 text——appendLine 的签名是 (type, text, autoScroll)，只传 type 会喂错内容');
+});
+
+test('武装开关 UI 存在且默认关闭', () => {
+  // 复选框不能带 checked：默认必须是"AI 只读"，写入要人显式开启
+  const m = html.match(/<input[^>]*id="aiArmedToggle"[^>]*>/);
+  assert.ok(m, '侧栏应有 #aiArmedToggle 复选框');
+  assert.doesNotMatch(m[0], /\bchecked\b/, '默认不得勾选');
+  assert.match(html, /id="aiArmedHint"/, '应有一处文字提示当前状态');
+});
+
+test('武装状态用独立键，不塞进 wtp_settings', () => {
+  // saveState() 按 settings 的固定字段整体回写 wtp_settings，
+  // 往里塞额外字段会被下一次保存覆盖，开关状态就会莫名丢失
+  const saveState = extractFn('saveState');
+  assert.match(saveState, /wtp_settings/, 'saveState 仍应保存 settings');
+  assert.doesNotMatch(saveState, /wtp_ai_armed/, 'saveState 不该管武装开关');
+  assert.doesNotMatch(html, /wtp_ai_armed/, '武装状态由 bridge-client.js 用独立键管理');
+});
+
+test('桥脚本按 bridge-protocol → fake-serial → bridge-client 的顺序加载', () => {
+  // fake-serial.js 在加载时就解构 root.BridgeProtocol.hexToBytes，
+  // 顺序错了 <script> 整块失败，且只表现为"假设备莫名其妙不可用"
+  const iProto = html.indexOf('<script src="bridge-protocol.js">');
+  const iFake = html.indexOf('<script src="fake-serial.js">');
+  const iClient = html.indexOf('<script src="bridge-client.js">');
+  assert.ok(iProto > 0 && iFake > iProto && iClient > iFake,
+    '三个 script 必须是 protocol → fake → client 的先后顺序，实际 ' + [iProto, iFake, iClient].join('/'));
+});
+
