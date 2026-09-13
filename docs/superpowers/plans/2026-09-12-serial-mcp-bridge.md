@@ -3087,7 +3087,7 @@ Expected 逐项确认：
 1. `dev.serial_source {mode:'fake'}` → 返回 `{source:'fake'}`
 2. `dev.fake_script` 配规则 `{matchHex:'0103000000', respondHex:'0103030064000a', delayMs:20}` → 返回 `{ruleCount:1}`
 3. `serial.connect` → `{connected:true}`
-4. `serial.send {data:'01030000000A', encoding:'hex'}` → `{bytesWritten:6}`，且终端日志出现 `[AI] → 01030000000a`
+4. `serial.send {data:'01030000000A', encoding:'hex'}` → `{bytesWritten:6}`，且终端日志出现一条 `[AI]` 前缀的发送记录并含 `01030000000a`（**不要硬编码整行字面量**——审计文案在实现中演进过，只断言前缀与关键字节）
 5. `dev.fake_capture` → `{hex:'01030000000a'}`，证明页面确实把字节写进了假串口
 6. `serial.read {cursor:0}` → 出现假设备回注的响应行
 7. `modbus.control {action:'set_mode', mode:'independent'}` → 返回含 `mode:'independent'` 与 `terminalFrozen:false`
