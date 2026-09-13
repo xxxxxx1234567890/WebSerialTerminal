@@ -1589,7 +1589,11 @@ test('seam 之外的串口逻辑未被改动', () => {
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `node --test test/client.test.js`
-Expected: FAIL — `navigator.serial` 被引用 4 次（2944、2950 附近与 4680、4687 附近），且无 `serialProvider`
+Expected: FAIL — 第 2、3 条红了（`serialProvider` 尚不存在）。
+
+⚠️ **注意：第 1 条断言在这一步不会红。** 它断言 `navigator.serial` 恰好被引用 2 次，而改动前**本来就是 2 次**（`:2944` 与 `:4680` 两处 `requestPort()`；该文件从未有过 `getPorts` 调用点）。所以 RED 证据只来自第 2、3 条。第 1 条的价值在**改动之后**：它把计数锁在 2，任何新增的直调都会让它变 3 而变红——这正是它要防的漂移。
+
+（计划早期版本此处写"被引用 4 次"，是凭假设填的过期预估，由 Task 7 实现者用 `git log -S "navigator.serial.getPorts"` 证伪后更正。）
 
 - [ ] **Step 3: 实现（3 处改动，一字不多）**
 
