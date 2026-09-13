@@ -5,6 +5,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const { WebSocketServer } = require('ws');
 const M = require('../mcp-server.js');
 const P = require('../bridge-protocol.js');
@@ -214,6 +215,30 @@ test('两个客户端实例的请求 id 集合不相交（多会话不撞车）'
   assert.deepStrictEqual(idsA.map(id => Number(id.split('-')[1])), [1, 2, 3]);
 });
 
+test('并发请求汇合到同一次连接尝试，不产生多余 socket', async t => {
+  const stub = await startBridgeStub();
+  t.after(stub.teardown);
+
+  const M2 = loadServerModule(stub.url);
+  const client = M2.createBridgeClient();
+
+  // 数组字面量从左到右同步求值，两次 request() 在首个 socket 打开之前
+  // 就先后进入 ensure()——正是"并发 tools/call"与"退避窗口内到达的请求"的形状。
+  const [r1, r2] = await Promise.all([
+    client.request('serial', 'status', {}),
+    client.request('serial', 'status', {}),
+  ]);
+
+  assert.strictEqual(r1.ok, true, '第一个请求应成功');
+  assert.strictEqual(r2.ok, true, '第二个请求应成功');
+  // 没有这条守卫时，第二次调用看到 state.ws 还是 null（它要等 open 才赋值），
+  // 于是各开一条 socket。输掉的那条永远不会被 state.ws 引用，可它的 close
+  // 处理器会无条件清空 state.ws、reject 全部在途请求——一个孤儿 socket 关闭
+  // 就能弄挂跑在健康 socket 上的请求。
+  assert.strictEqual(stub.connectionCount(), 1,
+    '并发请求必须汇合到同一次连接尝试，否则会开出孤儿 socket');
+});
+
 test('桥断开后客户端不抛异常，并自行退避重连成功', async t => {
   const stub = await startBridgeStub();
   t.after(stub.teardown);
@@ -250,6 +275,70 @@ test('桥断开后客户端不抛异常，并自行退避重连成功', async t 
 
   const again = await client.request('serial', 'status', {});
   assert.strictEqual(again.ok, true, '重连后请求应恢复');
+});
+
+// ════════════════════════════════════════════════════════
+// stdio 入口 main() 的守护
+// ════════════════════════════════════════════════════════
+// 上面全部用例都在进程内调用函数，够不到 main()。而两条全局约束——
+// "畸形输入不得让进程退出"与"stdout 只许放协议消息"——此前只靠读代码保证：
+// 一个误加的 console.log、或去掉 JSON.parse 的 catch，都会绿着上线，而 stdout
+// 被污染会破坏整条 MCP 流且症状古怪。这里 spawn 真实的入口来钉住它们。
+
+test('stdio 入口：畸形行不致命、stdout 只有协议消息、诊断走 stderr', async t => {
+  const stub = await startBridgeStub();
+  t.after(stub.teardown);
+
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'mcp-server.js')], {
+    env: { ...process.env, WEBTERM_HOME: HOME, WEBTERM_BRIDGE_URL: stub.url },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  t.after(() => { try { child.kill('SIGKILL'); } catch {} });
+
+  let out = '', err = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', d => { out += d; });
+  child.stderr.on('data', d => { err += d; });
+  // 进程若已崩，后续写入 stdin 会 EPIPE；不接住会反过来把测试进程带崩
+  child.stdin.on('error', () => {});
+
+  let exitCode;
+  const exited = new Promise(r => child.on('exit', c => { exitCode = c; r(c); }));
+
+  const line = o => JSON.stringify(o) + '\n';
+  child.stdin.write(
+    '{这行不是合法 JSON，主循环必须跳过它\n' +                        // 畸形行
+    '\n' +                                                            // 空行
+    line({ jsonrpc: '2.0', method: 'notifications/initialized' }) +   // 通知：不得回帧
+    line({ jsonrpc: '2.0', id: 1, method: 'ping' }) +
+    line({ jsonrpc: '2.0', id: 2, method: 'tools/call',
+           params: { name: 'webterm_status', arguments: {} } }),
+  );
+
+  // 注意先等响应到齐再 end()：stdin 结束时入口会 process.exit(0)，
+  // 抢在 stdout 冲刷之前退出会丢掉响应（有界问题，但会让本用例假红）
+  await waitFor(() => out.split('\n').filter(Boolean).length >= 2, 5000);
+
+  assert.strictEqual(child.exitCode, null, '畸形行把进程带崩了——它必须被跳过而不是致命');
+
+  const stdoutLines = out.split('\n').filter(Boolean);
+  // "stdout 只许放协议消息"的直接检验：任何一行不能解析成 JSON 就是污染
+  for (const l of stdoutLines) {
+    assert.doesNotThrow(() => JSON.parse(l), `stdout 混入了非协议内容：${JSON.stringify(l)}`);
+  }
+  // 恰好两条响应：畸形行与空行被跳过、通知不回帧、ping 与 tools/call 各一条
+  assert.deepStrictEqual(stdoutLines.map(l => JSON.parse(l).id), [1, 2],
+    '响应集合不对：畸形行/空行应被跳过，通知不得产生响应');
+  assert.match(JSON.parse(stdoutLines[1]).result.content[0].text, /connected/,
+    'tools/call 应经桥往返并带回内容');
+
+  assert.match(err, /\[mcp-server\] 就绪/, 'stderr 应有就绪日志');
+  assert.ok(!out.includes('[mcp-server]'), '诊断信息不得出现在 stdout——那会污染 MCP 流');
+
+  child.stdin.end();
+  assert.strictEqual(await exited, 0, 'stdin 结束后进程应干净退出');
+  assert.strictEqual(exitCode, 0);
 });
 
 // 临时 HOME 的清理。顺带收掉僵尸重连：token 文件没了之后，重连的 ensure()

@@ -213,12 +213,33 @@ const BRIDGE_URL = process.env.WEBTERM_BRIDGE_URL || 'ws://127.0.0.1:1982/bridge
 
 /** 与桥的长连接。断线自动重连；连不上时请求立即失败而不是永久挂起。 */
 function createBridgeClient() {
-  const state = { ws: null, seq: 0, pending: new Map(), retryMs: 500,
+  const state = { ws: null, connecting: null, seq: 0, pending: new Map(), retryMs: 500,
                   // 每个适配器进程一个随机标签，用于保证请求 id 全局唯一
                   tag: require('node:crypto').randomBytes(4).toString('hex') };
 
+  /**
+   * 取一条连通的 socket。在途的连接尝试必须缓存下来并复用。
+   *
+   * 只看 "state.ws 是否 OPEN" 是不够的：state.ws 要等 open 才赋值，所以首个 socket
+   * 打开之前到达的每个调用都会各开一条 socket（并发 tools/call、以及桥重启后退避
+   * 窗口内到达的请求，都会落进这个窗口）。输掉的那些 socket 永远不会被 state.ws
+   * 引用，可它们的 close 处理器会无条件清空 state.ws 并 reject 全部在途请求——
+   * 于是一个孤儿 socket 关闭，就能弄挂跑在健康 socket 上的请求。
+   * 让并发汇合到同一次尝试，孤儿就无从产生。
+   */
   function ensure() {
     if (state.ws && state.ws.readyState === 1) return Promise.resolve(state.ws);
+    if (!state.connecting) {
+      state.connecting = connect().then(
+        ws => { state.connecting = null; return ws; },
+        err => { state.connecting = null; throw err; },
+      );
+    }
+    return state.connecting;
+  }
+
+  /** 真正建立一条连接。只应由 ensure() 调用——它就是"汇合"这件事本身 */
+  function connect() {
     return new Promise((resolve, reject) => {
       let token;
       try { token = readToken(); } catch (e) { reject(e); return; }
