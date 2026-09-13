@@ -202,4 +202,175 @@ async function dispatchTool(name, args, request) {
   }
 }
 
-module.exports = { buildTools, dispatchTool, translateError, TOOL_MAP };
+// ════ 与桥的连接 ════
+const WebSocket = require('ws');
+const { readToken } = require('./bridge-auth.js');
+
+const SERVER_NAME = 'webterm-serial-bridge';
+const SERVER_VERSION = '1.0.0';
+const MCP_PROTOCOL_VERSION = '2024-11-05';
+const BRIDGE_URL = process.env.WEBTERM_BRIDGE_URL || 'ws://127.0.0.1:1982/bridge';
+
+/** 与桥的长连接。断线自动重连；连不上时请求立即失败而不是永久挂起。 */
+function createBridgeClient() {
+  const state = { ws: null, seq: 0, pending: new Map(), retryMs: 500,
+                  // 每个适配器进程一个随机标签，用于保证请求 id 全局唯一
+                  tag: require('node:crypto').randomBytes(4).toString('hex') };
+
+  function ensure() {
+    if (state.ws && state.ws.readyState === 1) return Promise.resolve(state.ws);
+    return new Promise((resolve, reject) => {
+      let token;
+      try { token = readToken(); } catch (e) { reject(e); return; }
+
+      const ws = new WebSocket(BRIDGE_URL, { headers: { 'x-webterm-token': token } });
+      const timer = setTimeout(() => {
+        try { ws.terminate(); } catch {}
+        reject(new Error(`连接桥超时（${BRIDGE_URL}）。请确认 server.js 已启动。`));
+      }, 3000);
+      // 本项目反挂死标准：有界等待计时器一律 unref，否则连不上桥时它会独自
+      // 拖着事件循环 3 秒，`node --test` 又没有 --test-timeout，挂起是无界的。
+      // 正常情况下 ws 的 socket 句柄仍持有事件循环，计时器照常触发。
+      timer.unref();
+
+      ws.on('open', () => {
+        clearTimeout(timer);
+        state.ws = ws;
+        state.retryMs = 500;
+        resolve(ws);
+      });
+      ws.on('message', raw => {
+        let msg;
+        try { msg = JSON.parse(raw.toString()); } catch { return; }
+        if (msg.kind !== 'res' || !state.pending.has(msg.id)) return;
+        const p = state.pending.get(msg.id);
+        state.pending.delete(msg.id);
+        p.resolve(msg);
+      });
+      ws.on('close', () => {
+        state.ws = null;
+        for (const [, p] of state.pending) p.reject(new Error('桥连接已断开'));
+        state.pending.clear();
+        // 这个重连计时器没有清零点（它本身就是等待下一次尝试），不 unref 的话
+        // 一次断线就能让进程再也退不掉。unref 后进程仍由 stdin 持有，重连照常。
+        // 注意不能写成 setTimeout(ensure, ...).catch(...)：setTimeout 返回的是
+        // Timeout 对象而非 Promise，那个 .catch 会在 close 处理器里抛
+        // TypeError，把整个 MCP 进程带崩（重连也就永远停在第一级退避）。
+        // 必须在回调里显式调用 ensure() 并吞掉它的 rejection——否则 token 缺失
+        // 时的拒绝会变成 unhandledRejection，同样致命。
+        setTimeout(() => { ensure().catch(() => {}); }, state.retryMs).unref();
+        state.retryMs = Math.min(state.retryMs * 2, 10000);
+      });
+      ws.on('error', err => {
+        clearTimeout(timer);
+        reject(new Error(`无法连接桥（${BRIDGE_URL}）：${err.message}。请确认 server.js 已启动。`));
+      });
+    });
+  }
+
+  return {
+    async request(domain, op, args) {
+      const ws = await ensure();
+      const id = `${state.tag}-${++state.seq}`;
+      // id 必须【全局】唯一，不是"适配器内唯一"：桥的请求表是全桥共享的一张 map，
+      // 而多个 Claude Code 会话各起一个适配器、各自从 1 开始编号 —— 必然撞车。
+      // 撞车的后果是静默摧毁活跃请求：孤儿计时器、把 BRIDGE_TIMEOUT 误发给第二个
+      // 请求者、页面的 res 只回给最后写入者而第一个请求者永远收不到。
+      // 桥侧另有冲突守卫作纵深防御，但正确的修法是在源头保证唯一。
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          state.pending.delete(id);
+          reject(new Error(`桥未在 30s 内返回 ${domain}.${op}`));
+        }, 30000);
+        timer.unref();   // 同上：请求超时不该把进程钉在事件循环上
+        state.pending.set(id, {
+          resolve: v => { clearTimeout(timer); resolve(v); },
+          reject: e => { clearTimeout(timer); reject(e); },
+        });
+        try { ws.send(JSON.stringify(P.makeReq(id, domain, op, args))); }
+        catch (e) { state.pending.delete(id); clearTimeout(timer); reject(e); }
+      });
+    },
+  };
+}
+
+// ════ JSON-RPC 分派 ════
+
+async function handleMessage(msg, request) {
+  if (!msg || typeof msg !== 'object') return null;
+  const { id, method, params } = msg;
+  const isNotification = id === undefined || id === null;
+
+  try {
+    switch (method) {
+      case 'initialize':
+        return reply(id, {
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          capabilities: { tools: {} },
+          serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+        });
+
+      case 'notifications/initialized':
+      case 'notifications/cancelled':
+        return null;   // 通知不得回响应
+
+      case 'ping':
+        return reply(id, {});
+
+      case 'tools/list':
+        return reply(id, { tools: buildTools() });
+
+      case 'tools/call': {
+        const name = params && params.name;
+        if (typeof name !== 'string') {
+          return error(id, -32602, 'Invalid params: 缺少 tools/call 的 name');
+        }
+        const result = await dispatchTool(name, (params && params.arguments) || {}, request);
+        return reply(id, result);
+      }
+
+      default:
+        return isNotification ? null : error(id, -32601, `Method not found: ${method}`);
+    }
+  } catch (e) {
+    // 任何异常都要转成 JSON-RPC 错误——抛出去会让整个 MCP 进程退出
+    return isNotification ? null : error(id, -32603, `Internal error: ${e.message}`);
+  }
+}
+
+const reply = (id, result) => ({ jsonrpc: '2.0', id, result });
+const error = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
+
+// ════ 入口：stdio 换行分隔 JSON ════
+
+function main() {
+  const bridge = createBridgeClient();
+  let buf = '';
+
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', chunk => {
+    buf += chunk;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); }
+      catch { continue; }   // 畸形行直接跳过，不能因此退出
+      handleMessage(msg, bridge.request).then(res => {
+        if (res) process.stdout.write(JSON.stringify(res) + '\n');
+      }).catch(err => {
+        process.stderr.write(`[mcp-server] 分派失败: ${err.message}\n`);
+      });
+    }
+  });
+
+  process.stdin.on('end', () => process.exit(0));
+  // stdout 只许放协议消息；日志一律走 stderr，否则会污染 MCP 流
+  process.stderr.write(`[mcp-server] 就绪，目标桥 ${BRIDGE_URL}\n`);
+}
+
+if (require.main === module) main();
+
+module.exports = { buildTools, dispatchTool, translateError, TOOL_MAP, handleMessage, createBridgeClient };
