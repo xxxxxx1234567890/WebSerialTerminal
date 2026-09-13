@@ -66,7 +66,13 @@ async function assertUpgradeRejected(connect) {
   assert.fail('本应被拒绝的升级请求被接受了');
 }
 
-const nextMessage = ws => new Promise(resolve => ws.once('message', d => resolve(JSON.parse(d.toString()))));
+// 有界等待：对端若不回帧，必须干净地失败，不能让整个套件无限悬着
+// （package.json 的 npm test 不带 --test-timeout，悬着就是无限挂起）
+const nextMessage = (ws, timeoutMs = 2000) => Promise.race([
+  new Promise(resolve => ws.once('message', d => resolve(JSON.parse(d.toString())))),
+  new Promise((_, reject) => setTimeout(
+    () => reject(new Error(`等待消息超时：对端未在 ${timeoutMs}ms 内回帧`)), timeoutMs).unref()),
+]);
 const send = (ws, obj) => ws.send(JSON.stringify(obj));
 
 before(async () => {
@@ -96,11 +102,11 @@ test('页面连接：Origin 合法则接受，hello 被记录', async () => {
 });
 
 test('页面连接：Origin 非法被拒（其他站点不能驱动串口）', async () => {
-  await assert.rejects(() => connectPage({ origin: 'http://evil.example.com' }), /HTTP \d+/);
+  await assertUpgradeRejected(() => connectPage({ origin: 'http://evil.example.com' }));
 });
 
 test('页面连接：缺失 Origin 被拒', async () => {
-  await assert.rejects(() => connectPage({ origin: null }), /HTTP \d+/);
+  await assertUpgradeRejected(() => connectPage({ origin: null }));
 });
 
 test('适配器连接：token 正确则接受', async () => {
@@ -111,22 +117,28 @@ test('适配器连接：token 正确则接受', async () => {
 });
 
 test('适配器连接：token 错误被拒', async () => {
-  await assert.rejects(() => connectAdapter({ token: 'deadbeef' }), /HTTP \d+/);
+  await assertUpgradeRejected(() => connectAdapter({ token: 'deadbeef' }));
 });
 
 test('适配器连接：无 token 被拒', async () => {
-  await assert.rejects(() => connectAdapter({ token: null }), /HTTP \d+/);
+  await assertUpgradeRejected(() => connectAdapter({ token: null }));
 });
 
 test('路径不是 /bridge 的升级请求被拒', async () => {
-  await assert.rejects(() => connectPage({ path: '/nope' }), /HTTP \d+/);
+  await assertUpgradeRejected(() => connectPage({ path: '/nope' }));
 });
 
 test('协议版本不匹配时响亮拒绝', async () => {
   const ws = await connectPage();
-  send(ws, { kind: 'hello', role: 'page', pageId: 'p-bad', protocolVersion: 999,
-             appVersion: 'x', capabilities: [] });
-  const msg = await nextMessage(ws);
+  let msg;
+  try {
+    send(ws, { kind: 'hello', role: 'page', pageId: 'p-bad', protocolVersion: 999,
+               appVersion: 'x', capabilities: [] });
+    msg = await nextMessage(ws);
+  } finally {
+    // 无论走哪条路都收尾：失败时若把 socket 留给 server.close() 去等，就是无限挂起
+    ws.terminate();
+  }
   assert.strictEqual(msg.kind, 'error');
   assert.match(msg.message, /协议版本/);
 });

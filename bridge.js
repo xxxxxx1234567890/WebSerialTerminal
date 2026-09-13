@@ -18,8 +18,10 @@ function attachBridge(server, deps) {
   const { token, isTrustedOrigin, isLocalHostname, hostnameOf, getActualPort } = deps;
   const log = deps.log || console;
 
-  const wss = new WebSocketServer({ noServer: true });
-  const state = { page: null, adapters: new Set(), pending: new Map() };
+  // maxPayload 与下面的应用层检查取同一个界，但它在 ws 解析期就强制：
+  // raw.length 只有等整帧缓冲完才可观测，光靠应用层检查挡不住内存被打爆
+  const wss = new WebSocketServer({ noServer: true, maxPayload: P.MAX_FRAME_BYTES });
+  const state = { page: null, adapters: new Set(), pending: new Map(), sockets: new Set() };
 
   /** 返回 { role } 或 { reject: {code, reason} } */
   function authorize(req) {
@@ -72,12 +74,16 @@ function attachBridge(server, deps) {
   });
 
   wss.on('connection', ws => {
+    // 所有被接受的连接都记在这里，而不只是记进角色槽：
+    // 没送过 hello 的 page socket、以及被后连接者覆写掉的那个，都不在任何角色槽里
+    state.sockets.add(ws);
     if (ws.bridgeRole === 'adapter') {
       state.adapters.add(ws);
     }
 
     ws.on('message', raw => {
-      // 帧上限：超大帧直接断开，避免打爆内存
+      // 第二道防线：maxPayload 已在解析期把超限帧挡下并以 1009 关闭，
+      // 这里再兜一次，免得日后有人调大 maxPayload 却忘了应用层的界
       if (raw.length > P.MAX_FRAME_BYTES) {
         log.warn('[bridge] 帧超限，断开连接');
         ws.close(1009, 'frame too large');
@@ -89,6 +95,7 @@ function attachBridge(server, deps) {
     });
 
     ws.on('close', () => {
+      state.sockets.delete(ws);
       state.adapters.delete(ws);
       if (state.page && state.page.ws === ws) state.page = null;
     });
@@ -120,8 +127,11 @@ function attachBridge(server, deps) {
 
   return {
     close() {
-      for (const ws of state.adapters) { try { ws.close(); } catch {} }
-      if (state.page) { try { state.page.ws.close(); } catch {} }
+      // 遍历全部已接受连接，而不是逐个角色去找——角色的槽位会漏掉那些没进槽的 socket。
+      // 用 terminate 而非 close：这里是关停路径，目的是让 server.close() 一定等得到回调，
+      // 而优雅关闭会等对端回 close 帧，对端不回就正好卡成我们要修的那个挂死。
+      for (const ws of state.sockets) { try { ws.terminate(); } catch {} }
+      state.sockets.clear();
       wss.close();
     },
     getStats() {
