@@ -386,6 +386,70 @@ test('速率限制是固定窗口而非永久计数器：窗口过后配额恢�
   page.close(); adapter.close();
 });
 
+test('请求 id 冲突：第二个同 id 请求被拒，第一个请求不受影响', async (t) => {
+  // state.pending 是全桥共享的命名空间，而适配器的 id 是 `r-${++seq}`、每个会话各自
+  // 从 1 起编号——多个 Claude Code 会话连同一个桥时（spec 选方案 A 的理由之一）必然撞号。
+  // 无条件 set 会让先到者的计时器变孤儿、超时错发给后到者、应答也路由给后到者。
+  // 本用例断言"静默摧毁"的反面：第二个被响亮拒绝，第一个完好无损。
+  // timeoutMs 拉到 60s：整条用例期间第一个请求都不会因超时离开请求表。
+  const inst = await attachBridgeOnNewServer({ timeoutMs: 60000 });
+  t.after(async () => { await inst.teardown(); });
+
+  const page = await connectPageTo(inst, { kind: 'hello', role: 'page', pageId: 'p-dup', protocolVersion: 1, capabilities: ['serial'] });
+  const a1 = await connectAdapterTo(inst);
+  const a2 = await connectAdapterTo(inst);
+
+  send(a1, P.makeReq('r-1', 'serial', 'read', {}));
+  assert.strictEqual((await nextMessage(page)).id, 'r-1', '第一个请求应被转发到页面');
+
+  send(a2, P.makeReq('r-1', 'serial', 'read', {}));
+  const denied = await nextMessage(a2);
+  assert.strictEqual(denied.id, 'r-1');
+  assert.strictEqual(denied.ok, false);
+  assert.strictEqual(denied.error.code, 'INVALID_ARGS');
+  // 上限和冲突共用 INVALID_ARGS（spec 的错误码是固定 9 项清单），靠 message 区分
+  assert.match(denied.error.message, /id 冲突/, '必须是因为 id 冲突，而不是撞上请求表上限');
+
+  // 关键：a1 的请求仍然完好。页面的应答必须回到 a1，而不是被顶替后的 a2
+  send(page, P.makeRes('r-1', { data: 'OK' }));
+  assert.deepStrictEqual(await nextMessage(a1), P.makeRes('r-1', { data: 'OK' }),
+    '第一个请求者的应答不能被后来者顶掉');
+  assert.strictEqual(inst.bridge.getStats().pending, 0, '应答后请求表应清空');
+
+  page.close(); a1.close(); a2.close();
+});
+
+test('请求表达到上限后拒绝新请求，不静默排队', async (t) => {
+  // bridge.js 里的 MAX_PENDING_REQUESTS 检查此前零守护：删掉那几行，其余用例仍全绿。
+  // 长超时保证整条用例期间已入表的请求不会因超时被清出去。
+  const inst = await attachBridgeOnNewServer({
+    timeoutMs: 60000,
+    // 必须放宽限流：默认 60 次/1000ms 会让第 61 个请求先被限流拒掉，够不到请求表上限
+    rateLimit: { max: 10000, windowMs: 1000 },
+  });
+  t.after(async () => { await inst.teardown(); });
+
+  const page = await connectPageTo(inst, { kind: 'hello', role: 'page', pageId: 'p-full', protocolVersion: 1, capabilities: ['serial'] });
+  const adapter = await connectAdapterTo(inst);
+
+  // 页面刻意不应答，于是每条请求都留在表里
+  for (let i = 0; i < P.MAX_PENDING_REQUESTS; i++) {
+    send(adapter, P.makeReq(`r-${i}`, 'serial', 'read', {}));
+  }
+  // 桥对单个 socket 按序处理，且前 64 条都不回帧，所以适配器收到的第一帧必然是
+  // 这一条的回复——据此可断定前 64 条已全部入表，不必用 sleep 去猜时序
+  send(adapter, P.makeReq('r-over', 'serial', 'read', {}));
+  const denied = await nextMessage(adapter);
+  assert.strictEqual(denied.id, 'r-over');
+  assert.strictEqual(denied.ok, false);
+  assert.strictEqual(denied.error.code, 'INVALID_ARGS');
+  assert.match(denied.error.message, /请求未完成/, '必须是因为请求表已满，而不是 id 冲突');
+  assert.strictEqual(inst.bridge.getStats().pending, P.MAX_PENDING_REQUESTS,
+    '被拒的请求不得入表，表应仍停在上限');
+
+  page.close(); adapter.close();
+});
+
 test('close() 撤掉挂起请求的定时器，不留计时器比桥活得久', async (t) => {
   // 简报的 5 个用例都碰不到这条路径：超时用例里请求表已自己清空，
   // 断开用例里是页面 close 触发的清理。页面仍连着时调用 close()，是唯一能

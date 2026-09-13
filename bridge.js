@@ -171,6 +171,16 @@ function attachBridge(server, deps) {
         return;
       }
 
+      // id 冲突守卫：state.pending 是全桥共享的命名空间，而适配器的 id 是 `r-${++seq}`、
+      // 每个会话各自从 1 起编号，所以两个会话必然撞号。覆盖会让先到者的计时器变成孤儿，
+      // 并把超时错发给后到者、把页面的应答也路由给后到者——先到者彻底收不到任何回应。
+      // 因此这里响亮拒绝，绝不覆盖既有条目。
+      if (state.pending.has(msg.id)) {
+        reply(ws, P.makeErr(msg.id, P.ERROR_CODES.INVALID_ARGS,
+          `请求 id 冲突：${msg.id} 正在处理中，id 需在桥内唯一。请换一个 id 重试。`));
+        return;
+      }
+
       // 请求表上限：反复超时不得让桥持续吃内存
       if (state.pending.size >= P.MAX_PENDING_REQUESTS) {
         reply(ws, P.makeErr(msg.id, P.ERROR_CODES.INVALID_ARGS,
@@ -178,19 +188,23 @@ function attachBridge(server, deps) {
         return;
       }
 
-      const timer = setTimeout(() => {
-        const p = state.pending.get(msg.id);
-        if (!p) return;
+      // 计时器绑定自己那条目，而不是触发时按 id 回查 map：
+      // 回查正是"孤儿计时器"的另一半——条目若被顶替，回查会查到别人的条目
+      // （把超时错发给无辜者）或查不到（静默不响应）。绑定 + 身份校验两件事都做，
+      // 后者是纵深防御：今日每条移除路径都会 clearTimeout，但它保证日后加路径时不会退化。
+      const entry = { adapter: ws, timer: null };
+      entry.timer = setTimeout(() => {
+        if (state.pending.get(msg.id) !== entry) return;
         state.pending.delete(msg.id);
-        reply(p.adapter, P.makeErr(msg.id, P.ERROR_CODES.BRIDGE_TIMEOUT,
+        reply(entry.adapter, P.makeErr(msg.id, P.ERROR_CODES.BRIDGE_TIMEOUT,
           `页面在 ${timeoutMs}ms 内未响应。请检查页面是否卡住。`));
       }, timeoutMs);
 
-      state.pending.set(msg.id, { adapter: ws, timer });
+      state.pending.set(msg.id, entry);
       try { state.page.ws.send(JSON.stringify(msg)); }
       catch (e) {
         state.pending.delete(msg.id);
-        clearTimeout(timer);
+        clearTimeout(entry.timer);
         reply(ws, P.makeErr(msg.id, P.ERROR_CODES.PAGE_NOT_CONNECTED, '转发失败：' + e.message));
       }
     }
