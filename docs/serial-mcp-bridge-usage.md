@@ -152,7 +152,7 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 
 ## 六、必须真人做的验证清单
 
-> 以下需要**真实浏览器（Chrome/Edge 标签页）+ 真人点击**，自动化环境无法覆盖。硬件需求按节而异：**D 明确无需硬件**（见该节标题，全程用假设备闭环）；**E、F、以及 B 的连设备一步都需要真实串口设备**——E 要验的恰恰是"真从站确实回了帧、页面却收不到"，所以要接一台真从站、并用串口助手在旁佐证，假端口是观察不到的（E 节自己也写明该前提`只有真机能证实`）；A、C、G 只需服务端与页面。
+> 以下需要**真实浏览器（Chrome/Edge 标签页）+ 真人点击**，自动化环境无法覆盖。硬件需求按节而异：**D 明确无需硬件**（见该节标题，全程用假设备闭环）；**E 也无需硬件**——它的每一步都能用 D 那套假设备跑完，见该节末尾；**F、以及 B 的连设备一步需要真实串口设备**（F 要验的正是"设备确实没收到""设备确实收到了"，必须有真设备在旁佐证）；A、C、G 只需服务端与页面。
 > 已在测试中以替身尽可能覆盖，但下面这些**只能由人确认**。请按序执行，每步都有期望值。
 
 ### A. 前置（必做，否则后面全部会被误导）
@@ -198,7 +198,7 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 
 ### E. ★★ `shared` 模式的响应前提（风险最高，自动化覆盖为 0）
 
-**为什么要单列**：D 表只走到 `serial_send` / `serial_read` / `set_mode`，而风险最高的行为——**`shared` 模式到底能不能收到 Modbus 响应**——在自动化里恰好被跳过（测试沙箱里 `modbusFeedResponse` 是空函数）。代码里"`shared` 模式下拒绝 `modbus_request`"这条前置**所依据的前提本身，只有真机能证实**。
+**为什么要单列**：D 表只走到 `serial_send` / `serial_read` / `set_mode`，而风险最高的行为——**`shared` 模式到底能不能收到 Modbus 响应**——在自动化里恰好被跳过（测试沙箱里 `modbusFeedResponse` 是空函数）。代码里"`shared` 模式下拒绝 `modbus_request`"这条前置**所依据的前提本身，只有**人工**能证实**。
 
 **前置（同 D，但这里漏了会误判）**：`npm install` → `npm start` → 开页面 → 确认 C 无告警 → **打开「允许 AI 写入」** → `/mcp` 确认 `webterm-serial` 已连接。
 
@@ -220,9 +220,16 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 4. `modbus_request {slaveId:1, funcCode:3, address:0, quantity:1}`
    - **期望**：**立刻**返回参数错误（不再等 500ms、不再出现"设备没响应"），终端留下"意图 + `✖ 失败`"两条 `[AI]` 记录
 5. `modbus_control {action:"set_mode", mode:"independent"}` → `{action:"connect"}` → 重发第 4 步
+   - **前置：只有一台设备时，先 `serial_disconnect` 断开终端。** 独立模式开的是**它自己的**端口，而 `set_mode independent` **不会释放终端的端口**：`modbusSetMode` 只把 `isPaused` 复位、把 `modbusPortMode` 改成 `independent`，终端那条连接原封不动；`{action:"connect"}` 则经 `withAuthorizedPort` → `getPorts()[idx]` → `modbusConnectPort()` 对**同一个端口对象**再 `open()` 一次。所以终端仍连着时这一步会失败——假设备下 `open()` 明确抛 `端口已打开`（`fake-serial.js` 的 `open()`），第 5 步也就拿不到 `outcome:"success"`；真设备下的结果取决于浏览器对"同一物理设备是否返回同一 `SerialPort` 对象"的语义，**未经实跑确认**。先在终端断开，两种情形都不必再讨论：独立模式自己 `open()` 后，`modbusReadLoop` 直接把字节喂给 `modbusFeedResponse`，不经过终端的暂停分支——这正是它收得到响应的原因。
    - **期望**：`outcome:"success"`，并带完整 TX/RX 帧（`txHex`/`rxHex`）、`pduHex`、`responseTimeMs`、`slaveId`、`funcCode`
    - **注意**：返回的是**原始帧 + PDU，不是解析后的寄存器值**（也没有线圈位图）。要读寄存器得自己解 `pduHex`——功能码 03/04 的 `pduHex` **首字节是功能码，第 2 字节才是字节数**，之后每 2 字节一个寄存器、大端序（字节数 = 2 × 寄存器个数）。例：`03020064` = 功能码 03、字节数 02、一个寄存器 `0x0064` = 100。另注：CRC 校验失败时**没有** `pduHex`，只给 `txHex`/`outcome`/`rxHex`/`responseTimeMs`/`note`。多格式（HEX/U16/I16/F32）渲染只存在于页面自己的表格里，MCP 工具不上报它。
 6. `modbus_control {action:"deactivate"}` → 终端输入框恢复可用
+
+**本节不需要真实设备也能跑**（用 D 那套假设备）：按 D 的前 3 步切到假设备并 `serial_connect`，再用 `fake_script` 换成**合法帧对**（请求 `010300000001840a`、应答 `0103020064b9af`）——要换一次，D 第 2 步那对帧的 CRC 是刻意不合法的——即可逐条复现上面两步：
+
+- **期望 A 照常出现**。假设备的应答被注进终端读循环正在消费的**同一条** `ReadableStream`（`fake-serial.js` 命中规则后 `_controller.enqueue`），读循环确实读到了它——`serial_status` 的 `counters.rxBytes` 会**上涨**——随后才在暂停分支丢弃，面板显示 `响应超时 (500ms)`。**rxBytes 上涨 + 面板超时**同时出现，就是"从站确实回了帧、页面却收不到"的完整证据，与真机走的是同一段代码；真设备只是把"帧确实回了"从脚本规则换成物理事实。
+- **第 4 步与硬件无关**：`shared` 模式下 `modbus_request` 由守卫直接拒绝，它只看模式，不看端口是真是假。
+- **第 5 步按上面的前置先断开终端**即可（假设备同样只有一个端口对象）。
 
 ### F. 真实硬件
 
