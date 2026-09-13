@@ -3064,12 +3064,13 @@ Expected 逐项确认：
 
 创建 `docs/serial-mcp-bridge.md`，内容需覆盖：
 
+- **部署前提：使用 AI 桥前必须 `npm install`**（桥依赖 `ws`）。终端本身的静态服务与日志保存不依赖任何外部模块——未安装时终端照常可用，启动会明确提示 AI 桥不可用及原因。这一条是 Task 6 审查发现的部署回归（`server.js` 原本零依赖可运行），已由 spec 第 5.6 节的"桥不得让终端不可用"原则覆盖，但用户文档必须写明
 - 启动步骤（先 `npm start` 再开 Claude Code）
 - 首次串口授权必须真人点一次的原因（Web Serial 的 transient activation 限制），以及之后即可自动重连
 - 武装开关的语义与默认关闭
 - 假设备的典型用法（`dev_serial` 的四个 action + `fake_script` 规则形状）
 - 错误码速查表（取自 spec 第 4.5 节）
-- 排障：token 文件位置、端口占用、页面未连接
+- 排障：token 文件位置（`<WEBTERM_HOME 或用户目录>/.webterm/bridge-token`）、端口占用、页面未连接
 
 - [ ] **Step 6: 提交**
 
