@@ -164,7 +164,11 @@ function buildFrame(funcCode, address, _quantity, writeData) {
 // dispatcher 会在每个写操作前调用 describeWrite，这里的断言就是那份保证。
 // ════════════════════════════════════════════════════════
 
-/** 所有写入类操作的 (domain, op, args, form) 四元组，新增写操作时应同步加入 */
+/** 所有写入类操作的 (domain, op, args, page) 四元组，新增写操作时应同步加入。
+ *  page 里放的是"args 里没有、只有页面才知道"的事实（轮询表单、宏命令）。 */
+const CYCLE_PAGE = {
+  cycle: { slaveId: '1', funcCode: '3', address: '0', quantity: '10', cycleIntervalMs: '1000' },
+};
 const WRITE_CASES = [
   ['serial', 'connect', { index: 0 }, {}],
   ['serial', 'connect', {}, {}],
@@ -176,7 +180,7 @@ const WRITE_CASES = [
   ['modbus', 'control', { action: 'disconnect' }, {}],
   ['modbus', 'control', { action: 'activate' }, {}],
   ['modbus', 'control', { action: 'deactivate' }, {}],
-  ['modbus', 'control', { action: 'cycle_start' }, { slaveId: '1', funcCode: '3', address: '0', quantity: '10', cycleIntervalMs: '1000' }],
+  ['modbus', 'control', { action: 'cycle_start' }, CYCLE_PAGE],
   ['modbus', 'control', { action: 'cycle_stop' }, {}],
   ['modbus', 'request', { slaveId: 1, funcCode: 3, address: 0, quantity: 10 }, {}],
   ['modbus', 'request', { slaveId: 1, funcCode: 6, address: 0, quantity: 1, writeData: '00 0A' }, {}],
@@ -186,7 +190,7 @@ const WRITE_CASES = [
   ['ui', 'action', { action: 'set_theme', theme: 'amber' }, {}],
   ['ui', 'action', { action: 'set_font', size: 18 }, {}],
   ['ui', 'action', { action: 'toggle_sidebar' }, {}],
-  ['ui', 'action', { action: 'run_macro', name: 'AT' }, {}],
+  ['ui', 'action', { action: 'run_macro', name: 'AT' }, { macroCmd: 'AT' }],
   ['ui', 'action', { action: 'save_log' }, {}],
   ['dev', 'serial_source', { mode: 'fake' }, {}],
   ['dev', 'fake_inject', { data: '41' }, {}],
@@ -213,12 +217,27 @@ test('读取类操作不产生审计行', () => {
 
 test('最高危的"启动轮询"审计行必须说清对谁发什么', () => {
   // 轮询会持续对真实硬件发报文，而终端里本来零痕迹——行里没有这些，
-  // 事后就无从追溯，"不做逐次确认"这个决策的前提也就没了
-  const desc = describeWrite('modbus', 'control', { action: 'cycle_start' },
-    { slaveId: '1', funcCode: '3', address: '0', quantity: '10', cycleIntervalMs: '1000' });
-  for (const frag of ['轮询', 'slave=1', 'fc=3', 'addr=0', 'qty=10', '1000']) {
+  // 事后就无从追溯，"不做逐次确认"这个决策的前提也就没了。
+  // 参数来自 page.cycle（页面侧应填 mv*，见浏览器测试的分叉场景）。
+  const desc = describeWrite('modbus', 'control', { action: 'cycle_start' }, {
+    cycle: { slaveId: '7', funcCode: '4', address: '9', quantity: '2', cycleIntervalMs: '500' },
+  });
+  for (const frag of ['轮询', 'slave=7', 'fc=4', 'addr=9', 'qty=2', '500']) {
     assert.ok(desc.includes(frag), `审计行应含「${frag}」，实际: ${desc}`);
   }
+  // 写功能码的轮询要把载荷也带上：帧里有什么就得记什么
+  const w = describeWrite('modbus', 'control', { action: 'cycle_start' }, {
+    cycle: { slaveId: '1', funcCode: '6', address: '0', quantity: '1', writeData: '00 0a', cycleIntervalMs: '1000' },
+  });
+  assert.ok(w.includes('数据=00 0a'), '写功能码的轮询要记下载荷：' + w);
+});
+
+test('宏的审计行必须带上实际会发出的命令（不能只记宏名）', () => {
+  // 只记宏名的话，追溯要依赖"宏定义在被查时仍未改动"——用户一改宏，记录就误导了
+  const desc = describeWrite('ui', 'action', { action: 'run_macro', name: 'AT' },
+    { macroCmd: 'AT+GMR' });
+  assert.ok(desc.includes('AT+GMR'), '审计行应含宏实际会发出的命令：' + desc);
+  assert.match(desc, /执行宏「AT」/);
 });
 
 test('审计行能看出"对硬件做了什么"：连接/发送/写寄存器带上目标与载荷', () => {
@@ -243,6 +262,31 @@ test('审计描述在参数缺失或非法时也不抛（审计行不得因参�
   }
   assert.match(describeWrite('serial', 'send', { data: 'ZZ', encoding: 'hex' }, {}), /无法按 hex 编码/,
     '编码失败时应退回原文而不是抛');
-  assert.match(describeWrite('modbus', 'control', { action: 'cycle_start' }, {}), /slave=\?/,
-    '表单读不到时用占位符而不是 undefined');
+});
+
+test('审计行里不得出现字面量 undefined（缺参一律给可读占位）', () => {
+  // 审计行里的 "undefined" 看起来像一个真实取值，会让事后追溯得出错误结论——
+  // 这与表单字段是同一条规则，不因为这里是 args / page 就放宽
+  for (const [d, o] of WRITE_CASES.map(c => [c[0], c[1]])) {
+    for (const args of [{}, { action: undefined, mode: undefined, name: undefined, theme: undefined, size: undefined, index: undefined }]) {
+      const desc = describeWrite(d, o, args, {});
+      assert.ok(!desc.includes('undefined'), `${d}.${o} 的审计行含 undefined：${desc}`);
+    }
+  }
+  // 逐个动作的缺参形态（上面只覆盖了通用键名）
+  const cases = [
+    ['modbus', 'control', { action: 'set_mode' }],
+    ['modbus', 'control', { action: 'cycle_start' }],
+    ['modbus', 'control', {}],
+    ['ui', 'action', { action: 'run_macro' }],
+    ['ui', 'action', { action: 'set_theme' }],
+    ['ui', 'action', { action: 'set_font' }],
+    ['ui', 'action', {}],
+    ['dev', 'serial_source', {}],
+    ['modbus', 'request', {}],
+  ];
+  for (const [d, o, a] of cases) {
+    const desc = describeWrite(d, o, a, {});
+    assert.ok(!desc.includes('undefined'), `${d}.${o} ${JSON.stringify(a)} 的审计行含 undefined：${desc}`);
+  }
 });

@@ -23,6 +23,9 @@ const vm = require('node:vm');
 const REPO = path.join(__dirname, '..');
 const HTML = fs.readFileSync(path.join(REPO, 'WebSerialTerminal.html'), 'utf8');
 
+/** 审计行的完整前缀。切片必须用它算长度，别写死数字。 */
+const AUDIT_PREFIX = 'sys|[AI] ';
+
 /** 从真实 HTML 里切出一个顶层函数。锚点找不到时必须响亮失败——
  *  静默跳过会让这个文件在页面被重构后继续"全绿"，而它正是为此存在的。 */
 function extractFn(name) {
@@ -70,8 +73,12 @@ const SELECT_VALUES = {
   baudRate: '115200', dataBits: '8', stopBits: '1', parity: 'none', flowControl: 'none',
   mbBaudRate: '9600', mbDataBits: '8', mbStopBits: '1', mbParity: 'none', mbFlowControl: 'none',
   colorTheme: 'green', fontSize: '14', maxLines: '2000',
+  // mb*（左侧 Modbus 面板）与 mv*（右侧 Modbus 视图）**故意给不同的值**：
+  // 轮询走的是 mv*（modbusViewSync 会用 mv* 覆盖 mb* 之后才构造帧），
+  // 两者取值相同的话，"审计行读了哪个表单"就永远测不出来。
   mbSlaveId: '1', mbFuncCode: '3', mbAddress: '0', mbQuantity: '10', mbWriteData: '',
-  mvCycleInterval: '1000',
+  mvSlaveId: '7', mvFuncCode: '4', mvAddress: '9', mvQuantity: '2', mvWriteData: '',
+  mvCycleInterval: '500',
 };
 const CHECKBOXES = ['chkTimestamp', 'chkHex', 'chkAutoScroll', 'chkLocalEcho', 'mbActivate',
   'mbAddrMode', 'mvAddrMode'];
@@ -221,7 +228,12 @@ function bootstrap({ protocol = 'http:' } = {}) {
     await lastWs.deliver({ id: 'r' + (api.seq = (api.seq || 0) + 1), kind: 'req', domain, op, args: args || {} });
     return JSON.parse(lastWs.sent[lastWs.sent.length - 1]);
   };
-  api.audits = () => lines.filter(l => l.startsWith('sys|[AI] ')).map(l => l.slice(8));
+  // 审计行正文。必须按前缀的**实际长度**切——写死 slice(8) 会留下一个前导空格，
+  // 于是所有 startsWith('✖ 失败：') 之类的断言全都永远匹配不上（死断言，
+  // 比没有断言更糟：它看起来覆盖了，其实什么都没验）。
+  api.audits = () => lines.filter(l => l.startsWith(AUDIT_PREFIX))
+    .map(l => l.slice(AUDIT_PREFIX.length));
+
   api.teardown = async () => {
     // 先置标志位再关端口：与页面 disconnectPort 的 flag-first 模式一致，
     // 否则 readLoop 会在已关闭的流上反复拿到 {done:true} 变成死循环
@@ -372,12 +384,13 @@ test('审计覆盖：每个写入操作都留下可读的 [AI] 行（含最高�
   assert.strictEqual(added.length, cases.length,
     '每个写入操作应恰好留下一条意图审计行，实际：\n' + added.join('\n'));
 
-  // 最高危的一条：轮询会持续对真实硬件发报文，行里必须说清对谁发什么
+  // 最高危的一条：轮询会持续对真实硬件发报文，行里必须说清对谁发什么。
+  // 这里的期望值取自 mv*（轮询真正使用的来源），不是 mb*
   const cycle = added.find(l => l.includes('轮询'));
   assert.ok(cycle, '启动/停止轮询必须有审计行');
-  assert.match(cycle, /slave=1/, '审计行要带上将要对哪个从站发什么');
-  assert.match(cycle, /fc=3/);
-  assert.match(cycle, /间隔=1000ms/);
+  assert.match(cycle, /slave=7/, '审计行要带上将要对哪个从站发什么');
+  assert.match(cycle, /fc=4/);
+  assert.match(cycle, /间隔=500ms/);
   assert.strictEqual(b.sandbox.__cycleStarted, true, '审计之外，动作仍须真的执行');
 
   // ui.action 这一类也要有可读的动作名，而不是 'undefined'
@@ -389,6 +402,43 @@ test('审计覆盖：每个写入操作都留下可读的 [AI] 行（含最高�
 // ════════════════════════════════════════════════════════
 // 三、参数契约
 // ════════════════════════════════════════════════════════
+
+test('轮询审计行报的是线缆上真正会发生的目标（两表单分叉时不能报错来源）', async t => {
+  // 真实调用链：modbusStartCycle → modbusViewSend → modbusViewSync（用 mv* 覆盖 mb*）
+  //            → modbusSend（此刻才构造帧）
+  // 所以轮询发往的是 mv*，而 AI 的 modbus.request 只写 mb*。先用一次 modbus.request
+  // 把两个表单弄分叉，再启动轮询——审计行必须报 mv* 的值。
+  // （纯函数测试传的是手搓快照，抓不到这个；必须走真实的 DOM 与真实调用链。）
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  b.sandbox.isConnected = true;
+  b.sandbox.modbusActive = true;
+
+  // 1) 制造分叉：写 mb*（AI 的 modbus.request 就是这么干的）
+  await b.req('modbus', 'request',
+    { slaveId: 2, funcCode: 6, address: 100, quantity: 1, writeData: '0001' });
+  assert.strictEqual(b.ids.get('mbSlaveId').value, '2', 'modbus.request 应写进 mb*');
+  assert.strictEqual(b.ids.get('mvSlaveId').value, '7', 'mv* 不受 modbus.request 影响');
+  assert.notStrictEqual(b.ids.get('mbSlaveId').value, b.ids.get('mvSlaveId').value,
+    '两个表单此刻必须真的分叉了，否则这条测试没有验证力');
+
+  // 2) 启动轮询，断言审计行报的是 mv* 的值
+  const before = b.audits().length;
+  const r = await b.req('modbus', 'control', { action: 'cycle_start' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  const line = b.audits().slice(before).find(l => l.includes('轮询'));
+  assert.ok(line, '必须有轮询审计行');
+  for (const frag of ['slave=7', 'fc=4', 'addr=9', 'qty=2', '间隔=500ms']) {
+    assert.ok(line.includes(frag),
+      `审计行必须报轮询实际使用的 mv* 值（含「${frag}」），实际: ${line}\n`
+      + '报了 mb* 的值就等于记下了一个线缆上不会发生的目标');
+  }
+  assert.ok(!/slave=2|addr=100/.test(line),
+    '绝不能把 mb* 的值（AI 上一次 modbus.request 写的）当成轮询目标：' + line);
+});
 
 test('dev.fake_inject 默认按 hex 注入（与 dev_serial schema 声明的默认值一致）', async t => {
   const b = bootstrap();
@@ -531,8 +581,7 @@ test('假设备端到端：真实 connectPort 打开假串口，真读循环把�
   assert.strictEqual(insp.data.lastLines[0].color, 'rgb(0, 255, 65)', '应取计算后颜色');
 });
 
-test('异常不外泄：未知操作回 OP_UNSUPPORTED，非 JSON 消息被静默忽略', async t => {
-  const b = bootstrap();
+test('异常不外泄：未知操作回 OP_UNSUPPORTED，非 JSON 消息被静默忽略', async t => {  const b = bootstrap();
   t.after(b.teardown);
   await b.ready();
   b.ws.open();
@@ -541,3 +590,50 @@ test('异常不外泄：未知操作回 OP_UNSUPPORTED，非 JSON 消息被静�
   await b.ws.onmessage({ data: 'not json' });     // 不得抛
   assert.strictEqual(b.wsCount, 1);
 });
+
+// ════════════════════════════════════════════════════════
+// 五、只有意图行、没有结果行 = 审计不可信
+//
+// 失败的写操作必须补一条 ✖ 失败行；空操作（已连接时再 connect）必须补一条结果行。
+// 否则事后无法区分"执行了"与"根本没执行"——这正是当初把审计定为
+// "不做逐次确认"的唯一补偿控制时所依赖的东西。
+// ════════════════════════════════════════════════════════
+
+test('失败的写操作补一条 ✖ 失败行（不能只留意图行）', async t => {
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  // 未连接时发数据：必失败
+  const r = await b.req('serial', 'send', { data: 'AT' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error.code, 'PORT_NOT_CONNECTED');
+
+  const audits = b.audits();
+  assert.ok(audits.some(l => l.startsWith('发送 ')), '应有意图行：' + audits.join('\n'));
+  // 这条断言本身曾经是死的（前缀切片少算一个字符，留下前导空格），断言"没死"要先验证它抓得到
+  const fails = audits.filter(l => l.startsWith('✖ 失败：'));
+  assert.strictEqual(fails.length, 1,
+    '失败的写操作必须恰有一条 ✖ 失败行，实际：' + JSON.stringify(audits));
+  assert.match(fails[0], /未连接串口/, '失败行要带上原因');
+});
+
+test('已连接时的空操作 serial.connect 也要有结果行', async t => {
+  const b = bootstrap();
+  t.after(b.teardown);
+  await b.ready();
+  b.ws.open();
+  b.sandbox.localStorage.setItem('wtp_ai_armed', '1');
+  await b.req('dev', 'serial_source', { mode: 'fake' });
+  await b.req('serial', 'connect', {});
+  const idx = b.audits().length;
+
+  const again = await b.req('serial', 'connect', {});
+  assert.strictEqual(again.data.alreadyConnected, true);
+  const added = b.audits().slice(idx);
+  assert.strictEqual(added.length, 2,
+    '空操作也应有"意图 + 结果"两条，实际：' + JSON.stringify(added));
+  assert.match(added[1], /已处于连接状态/, '结果行要说明没有实际动作');
+});
+

@@ -138,19 +138,21 @@
    * （design 第 7.2 节），所以"每个写入都留痕"必须由 dispatcher 统一保证——
    * 集中在这一处，将来新增写操作不可能漏掉；散在各个 handler 里则迟早会漏。
    *
-   * `form` 是页面 Modbus 表单的快照（轮询参数只存在于 DOM 里，args 里没有），
-   * 由调用方读好后传入，保持本函数可脱离 DOM 单测。
+   * `page` 是页面侧快照：args 里没有、只有页面才知道的事实。审计行必须报
+   * **线缆上真正会发生的事**，所以这些字段一律取自"实际驱动该操作的那个来源"，
+   * 由调用方读好后传入，本函数保持可脱离 DOM 单测。
+   *   page.cycle    = 轮询实际使用的表单（mv*，见 readPageSnapshot 的说明）
+   *   page.macroCmd = 宏实际会发出的命令
    * 返回 null 表示不是写操作（读取类无需审计）。
    */
-  function describeWrite(domain, op, args, form) {
+  function describeWrite(domain, op, args, page) {
     const a = args || {};
     if (!isWriteOp(domain, op, a)) return null;
-    // 表单值缺失时用占位符：审计行宁可写 "?" 也不能写 "undefined"，
-    // 后者看起来像一个真实取值，会让事后追溯得出错误结论
-    const f = k => {
-      const v = (form || {})[k];
-      return (v === undefined || v === null || v === '') ? '?' : v;
-    };
+    const pg = page || {};
+    // 缺参一律给可读占位：审计行里出现字面量 "undefined" 会看起来像一个真实取值，
+    // 事后追溯会因此得出错误结论（与表单字段同一条规则，不因为这里是 args 就放宽）
+    const or = v => (v === undefined || v === null || v === '' ? '?' : v);
+    const f = k => or((pg.cycle || {})[k]);
     const idx = Number.isInteger(a.index) ? a.index : 0;
     switch (domain + '.' + op) {
       case 'serial.connect': return `连接串口（已授权端口 index=${idx}）`;
@@ -159,33 +161,39 @@
       case 'serial.set_params': return '记录串口参数（需断开重连才生效）';
       case 'modbus.control': {
         switch (a.action) {
-          case 'set_mode': return `Modbus 模式切到 ${a.mode}`;
+          case 'set_mode': return `Modbus 模式切到 ${or(a.mode)}`;
           case 'connect': return `Modbus 独立串口连接（已授权端口 index=${idx}）`;
           case 'disconnect': return 'Modbus 独立串口断开';
           case 'activate': return 'Modbus 启用';
           case 'deactivate': return 'Modbus 停用';
           // 轮询会持续对真实硬件发报文，而终端里本来零痕迹——这条必须带上"对谁发什么"，
-          // 否则事后无从追溯，与"不做逐次确认"的前提直接冲突
-          case 'cycle_start':
+          // 否则事后无从追溯，与"不做逐次确认"的前提直接冲突。
+          // 参数只能取自 mv*：modbusStartCycle → modbusViewSend → modbusViewSync 会用
+          // mv* 覆盖 mb* 之后才构造帧，读 mb* 会报出一个线缆上不会发生的目标。
+          case 'cycle_start': {
+            const data = f('writeData') === '?' ? '' : ' 数据=' + f('writeData');
             return `Modbus 启动轮询 slave=${f('slaveId')} fc=${f('funcCode')} addr=${f('address')}`
-                 + ` qty=${f('quantity')} 间隔=${f('cycleIntervalMs')}ms`;
+                 + ` qty=${f('quantity')} 间隔=${f('cycleIntervalMs')}ms${data}`;
+          }
           case 'cycle_stop': return 'Modbus 停止轮询';
-          default: return 'Modbus control：' + a.action;
+          default: return 'Modbus control：' + or(a.action);
         }
       }
       case 'modbus.request': {
         const data = a.writeData === undefined || a.writeData === null || a.writeData === ''
           ? '' : ' 数据=' + a.writeData;
-        return `Modbus 请求 slave=${a.slaveId} fc=${a.funcCode} addr=${a.address}`
-             + ` qty=${a.quantity}${data}`;
+        return `Modbus 请求 slave=${or(a.slaveId)} fc=${or(a.funcCode)} addr=${or(a.address)}`
+             + ` qty=${or(a.quantity)}${data}`;
       }
       case 'ui.action': {
-        if (a.action === 'run_macro') return `执行宏「${a.name}」`;
-        if (a.action === 'set_theme') return `主题切到 ${a.theme}`;
-        if (a.action === 'set_font') return `字号切到 ${a.size}`;
-        return '界面动作 ' + a.action;
+        // 宏必须带上实际会发出的命令：只记宏名的话，追溯要靠"宏定义在被查时仍未改动"，
+        // 用户一改宏，记录就误导了
+        if (a.action === 'run_macro') return `执行宏「${or(a.name)}」→ ${or(pg.macroCmd)}`;
+        if (a.action === 'set_theme') return `主题切到 ${or(a.theme)}`;
+        if (a.action === 'set_font') return `字号切到 ${or(a.size)}`;
+        return '界面动作 ' + or(a.action);
       }
-      case 'dev.serial_source': return `串口源切到 ${a.mode}`;
+      case 'dev.serial_source': return `串口源切到 ${or(a.mode)}`;
       case 'dev.fake_inject': return '假设备注入 ' + describeData(a, a.encoding || 'hex');
       case 'dev.fake_script': return `设置 ${(a.rules || []).length} 条假设备应答规则`;
       default: return domain + '.' + op;
@@ -359,7 +367,12 @@
       },
 
       'serial.connect': async args => {
-        if (isConnected) return { alreadyConnected: true };
+        if (isConnected) {
+          // 空操作也要有结果行：dispatcher 已经写过意图行，只留意图没有结果，
+          // 事后无法区分"连上了"和"根本没执行"（与失败行同一个理由）
+          audit('已处于连接状态，未重复连接');
+          return { alreadyConnected: true };
+        }
         // 走 withAuthorizedPort：AI 免手势，绝不弹选择框（人工点按钮才弹）
         await withAuthorizedPort(args && args.index, () => connectPort());
         if (!isConnected) throw err(P.ERROR_CODES.PAGE_ERROR, '连接未成功建立');
@@ -694,18 +707,39 @@
     }
 
     // ── 请求处理 ──
-    /** 页面 Modbus 表单快照。轮询参数只存在于 DOM 里（args 里没有），
-     *  而"启动轮询"恰恰是最需要留痕的写入 —— 交给纯函数 describeWrite 使用。 */
-    function readModbusForm() {
+    /**
+     * 页面侧快照：args 里没有、只有页面才知道的事实，供 describeWrite 使用。
+     *
+     * 轮询参数必须读 **mv\***（右侧 Modbus 视图）而不是 mb\*：调用链是
+     *   modbusStartCycle → modbusViewSend → modbusViewSync（此处用 mv* 覆盖 mb*）
+     *   → modbusSend（到这一步才构造帧）
+     * 而 mvSlaveId/mvFuncCode/mvAddress/mvQuantity 没有任何 JS 赋值，只有 HTML 默认值。
+     * 所以 AI 每调一次 modbus.request（它只写 mb*）两个表单就分叉一次，
+     * 此后读 mb* 报出的目标与实际轮询发往的目标不是一回事——那正是虚假审计记录。
+     * （间隔字段本来就读 mvCycleInterval，说明这里必须与轮询同源。）
+     *
+     * 注意：这里**不能**为了对齐而调用 modbusViewSync()——那会改动用户可见的表单，
+     * 还会经 modbusToggleAddrMode() 重算 modbusAddrHex，把 modbus.request 特意设定的
+     * DEC 地址模式一起带偏。只做纯读取。
+     */
+    function readPageSnapshot(domain, op, args) {
       const val = id => {
         const el = document.getElementById(id);
-        return el ? el.value : '?';
+        return el ? el.value : undefined;
       };
-      return {
-        slaveId: val('mbSlaveId'), funcCode: val('mbFuncCode'),
-        address: val('mbAddress'), quantity: val('mbQuantity'),
-        cycleIntervalMs: val('mvCycleInterval'),
-      };
+      const snapshot = {};
+      if (domain === 'modbus' && (args || {}).action === 'cycle_start') {
+        snapshot.cycle = {
+          slaveId: val('mvSlaveId'), funcCode: val('mvFuncCode'), address: val('mvAddress'),
+          quantity: val('mvQuantity'), writeData: val('mvWriteData'),
+          cycleIntervalMs: val('mvCycleInterval'),
+        };
+      }
+      if (domain === 'ui' && (args || {}).action === 'run_macro') {
+        const m = (macros || []).find(x => x.label === (args || {}).name);
+        snapshot.macroCmd = m ? m.cmd : undefined;   // 宏不存在时由 handler 报 INVALID_ARGS
+      }
+      return snapshot;
     }
 
     async function handleReq(msg) {
@@ -727,7 +761,8 @@
         // "不做逐次确认"的唯一补偿控制，覆盖必须是结构性的——散着写迟早会漏掉一个，
         // 而漏掉的那个（比如"启动轮询"）正是事后唯一说不清的操作。
         // 审计行本身不得因参数问题消失，故 describeWrite 保证不抛。
-        audit(describeWrite(msg.domain, msg.op, msg.args, readModbusForm()));
+        audit(describeWrite(msg.domain, msg.op, msg.args,
+          readPageSnapshot(msg.domain, msg.op, msg.args)));
       }
       try {
         const data = await handler(msg.args || {});
