@@ -1414,12 +1414,26 @@ test('启动时写入桥 token，供 mcp-server.js 读取', async () => {
 
 test('/bridge 拒绝非法 Origin 的升级请求', async () => {
   const WebSocket = require('ws');
-  await assert.rejects(() => new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/bridge`, { origin: 'http://evil.example.com' });
-    ws.on('open', () => resolve(ws));
-    ws.on('error', reject);
-    ws.on('unexpected-response', (_r, res) => reject(new Error('HTTP ' + res.statusCode)));
-  }), /HTTP 403/);
+  // 有界 + 失败即处置。若拒绝逻辑被破坏、连接被错误接受，被泄漏的客户端 socket
+  // 会吊住测试进程的事件循环，而 npm test 不带 --test-timeout —— 那就是无限挂起。
+  // 与 Task 4 那个 180s 挂死同类，只是发生在客户端侧。
+  let leaked = null;
+  try {
+    await assert.rejects(
+      () => new Promise((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/bridge`, { origin: 'http://evil.example.com' });
+        // 计时器必须 unref：否则每次『通过』的运行也要多等满 2 秒
+        const timer = setTimeout(() => reject(new Error('升级既未成功也未在 2s 内被拒')), 2000);
+        timer.unref();
+        ws.on('open', () => { clearTimeout(timer); leaked = ws; resolve(ws); });
+        ws.on('error', e => { clearTimeout(timer); reject(e); });
+        ws.on('unexpected-response', (_r, res) => { clearTimeout(timer); reject(new Error('HTTP ' + res.statusCode)); });
+      }),
+      /HTTP 403/
+    );
+  } finally {
+    if (leaked) leaked.terminate();   // 失败路径必须先处置再向上抛，否则进程挂住
+  }
 });
 ```
 
