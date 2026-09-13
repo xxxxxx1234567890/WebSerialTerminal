@@ -23,6 +23,8 @@
 - **语言风格**：注释与用户可见消息用中文；代码标识符用英文。注释解释"为什么"，不解释"是什么"
 - **提交格式**：`<type>: <desc>`，type ∈ {feat, fix, refactor, docs, test, chore}。**只 add 本任务涉及的路径**——工作区可能有他人进行中的改动
 - **测试命令**：单文件用 `node --test test/<file>.test.js`；全量用 `npm test`
+- **计划中针对既有文件的代码片段可能早于该文件的实际实现**：本计划的设计先于各任务落地，而后续任务的实现会在审查中演进（例如 Task 4 的实现新增了 `state.sockets` 全量 socket 追踪与 `close()` 的 terminate-all，本计划的原文并未反映）。因此修改既有文件时**必须先读真实文件**，并**保留前序任务作出的修复**。若发现计划片段会回退既有修复，**采纳真实文件并报告冲突**，不要照抄计划
+- **给测试运行加硬界**：`npm test` 不带 `--test-timeout`，所以挂起是无界的。跑测试一律用 `timeout 90 node --test --test-timeout=15000 <file>`；实现者若发现自己被挂住，损失应是 90 秒而不是 600 秒
 
 ## 跨任务接口（先钉死，避免任务之间对不上）
 
@@ -1153,17 +1155,27 @@ test('速率限制：超过窗口配额时拒绝而非静默排队', async (t) =
   const page = await connectPageTo(limited, { kind: 'hello', role: 'page', pageId: 'p-rate', protocolVersion: 1, capabilities: ['serial'] });
   const adapter = await connectAdapterTo(limited);
 
+  // 页面必须对"被放行"的请求回声。否则前两个请求被接受并转发给一个从不作答的页面，
+  // 永远没有响应——下面的等待只会超时，而被限流那个请求的响应也永远等不到正确位置。
+  page.on('message', raw => {
+    const req = JSON.parse(raw.toString());
+    if (req.kind === 'req') page.send(JSON.stringify(P.makeRes(req.id, { ok: true })));
+  });
+
+  // 发一条读一条，避免同一 tick 内堆叠多帧
   const results = [];
   for (let i = 0; i < 3; i++) {
     send(adapter, P.makeReq(`r-40${i}`, 'serial', 'status', {}));
+    results.push(await nextMessage(adapter));
   }
-  for (let i = 0; i < 3; i++) results.push(await nextMessage(adapter));
+
   // 限流复用 INVALID_ARGS 而非新增 RATE_LIMITED：spec 第 4.5 节的错误码是固定的
   // 9 项清单，T1 的测试逐项断言了该清单，新增码会破坏它。
   // 面向模型的可读提示由 message 承担（"请求过于频繁（上限 N 次 / M ms）"）。
-  const codes = results.filter(r => !r.ok).map(r => r.error.code);
-  assert.deepStrictEqual(codes, ['INVALID_ARGS'],
-    '第 3 个请求应被限流拒绝（码复用 INVALID_ARGS，理由见上）');
+  const rejected = results.filter(r => !r.ok).map(r => r.error.code);
+  assert.deepStrictEqual(rejected, ['INVALID_ARGS'],
+    '第 3 个请求应被限流拒绝（前 2 个被放行、由页面回声）');
+  assert.strictEqual(results.filter(r => r.ok).length, 2, '前 2 个请求应被放行');
 
   page.close(); adapter.close();
 });
@@ -1183,7 +1195,7 @@ test('页面断开时挂起的请求被清理', async () => {
 });
 ```
 
-**辅助函数已由 Task 4 加入该文件**（`attachBridgeOnNewServer` / `connectPageTo` / `connectAdapterTo`）——**直接复用，不要重复定义**。重复的 `function` 声明是合法 JS 且后者会静默遮蔽前者，属最难排查的一类缺陷。以下为其**形状**，供对照用法——**文件中已存在，勿复制**（其中 `attachBridgeOnNewServer` 是 `async`，调用处**必须 `await`**）：
+在该测试文件顶部（`before` 之前）加入三个辅助函数，供多实例测试使用（**它们尚不存在**——已核对 Task 4 的提交 `d0f4b32`，零命中）。以下为其形状（注意 `attachBridgeOnNewServer` 是 `async`，调用处**必须 `await`**）：
 
 ```js
 // 独立实例（自带端口与桥），用于测试超时/限流等需要不同配置的场景
