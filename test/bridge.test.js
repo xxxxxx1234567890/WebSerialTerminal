@@ -75,6 +75,43 @@ const nextMessage = (ws, timeoutMs = 2000) => Promise.race([
 ]);
 const send = (ws, obj) => ws.send(JSON.stringify(obj));
 
+// 独立实例（自带端口与桥），用于测试超时/限流等需要不同配置的场景
+async function attachBridgeOnNewServer(opts = {}) {
+  const srv = http.createServer((_req, res) => res.writeHead(404).end());
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const b = attachBridge(srv, {
+    token: TOKEN, isTrustedOrigin, isLocalHostname, hostnameOf,
+    getActualPort: () => srv.address().port,
+    log: { info() {}, warn() {}, error() {} },
+    timeoutMs: opts.timeoutMs,
+    rateLimit: opts.rateLimit,
+  });
+  return {
+    port: srv.address().port, bridge: b,
+    teardown: async () => { b.close(); await new Promise(r => srv.close(r)); },
+  };
+}
+
+function connectPageTo(inst, hello) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${inst.port}/bridge`, {
+      origin: `http://localhost:${inst.port}`,
+    });
+    ws.on('open', () => { if (hello) ws.send(JSON.stringify(hello)); resolve(ws); });
+    ws.on('error', reject);
+  });
+}
+
+function connectAdapterTo(inst) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${inst.port}/bridge`, {
+      headers: { 'x-webterm-token': TOKEN },
+    });
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
+  });
+}
+
 before(async () => {
   server = http.createServer((_req, res) => res.writeHead(404).end());
   await new Promise(r => server.listen(0, '127.0.0.1', r));
@@ -214,4 +251,167 @@ test('关停：未送 hello 的 page socket 不得让 server.close() 挂住', as
     // 失败路径上这条连接还活着：不收尾，整个测试进程就退不出去
     try { ws.terminate(); } catch {}
   }
+});
+
+// ── 路由、超时、限流 ──────────────────────────────────────
+
+test('请求被转发到页面，页面响应回传适配器', async () => {
+  const page = await connectPage();
+  send(page, { kind: 'hello', role: 'page', pageId: 'p-route', protocolVersion: 1, capabilities: ['serial'] });
+  await new Promise(r => setTimeout(r, 30));
+
+  const adapter = await connectAdapter();
+  send(adapter, P.makeReq('r-100', 'serial', 'send', { data: 'AT', encoding: 'ascii' }));
+
+  const fwd = await nextMessage(page);
+  assert.deepStrictEqual(fwd, P.makeReq('r-100', 'serial', 'send', { data: 'AT', encoding: 'ascii' }));
+
+  send(page, P.makeRes('r-100', { bytesWritten: 2 }));
+  const back = await nextMessage(adapter);
+  assert.deepStrictEqual(back, P.makeRes('r-100', { bytesWritten: 2 }));
+  assert.strictEqual(bridge.getStats().pending, 0, '响应后请求表应清空');
+
+  page.close(); adapter.close();
+});
+
+test('页面未连接时立即返回 PAGE_NOT_CONNECTED', async () => {
+  const adapter = await connectAdapter();
+  send(adapter, P.makeReq('r-200', 'serial', 'send', { data: 'AT' }));
+  const res = await nextMessage(adapter);
+  assert.strictEqual(res.id, 'r-200');
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.error.code, 'PAGE_NOT_CONNECTED');
+  adapter.close();
+});
+
+test('页面不响应时超时返回 BRIDGE_TIMEOUT 并清理请求表', async (t) => {
+  // attachBridgeOnNewServer 是 async —— 漏 await 会让 slow 变成 Promise、slow.port 变 undefined，
+  // 报错表现为 "Invalid URL: ws://127.0.0.1:undefined/bridge"
+  const slow = await attachBridgeOnNewServer({ timeoutMs: 80 });
+  // teardown 必须注册到 t.after，不能写在测试体末尾：
+  // 测试超时或中途失败时末尾语句永不执行，server 句柄不释放，进程永不退出——
+  // 而 npm test 不带 --test-timeout，那就是无限挂起
+  t.after(async () => { await slow.teardown(); });
+
+  const page = await connectPageTo(slow, { kind: 'hello', role: 'page', pageId: 'p-slow', protocolVersion: 1, capabilities: ['serial'] });
+  const adapter = await connectAdapterTo(slow);
+
+  send(adapter, P.makeReq('r-300', 'serial', 'read', {}));
+  const res = await nextMessage(adapter);
+  assert.strictEqual(res.error.code, 'BRIDGE_TIMEOUT');
+  assert.strictEqual(slow.bridge.getStats().pending, 0, '超时后必须清理，否则反复超时会吃内存');
+
+  page.close(); adapter.close();
+});
+
+test('速率限制：超过窗口配额时拒绝而非静默排队', async (t) => {
+  const limited = await attachBridgeOnNewServer({ rateLimit: { max: 2, windowMs: 10000 } });
+  t.after(async () => { await limited.teardown(); });
+
+  const page = await connectPageTo(limited, { kind: 'hello', role: 'page', pageId: 'p-rate', protocolVersion: 1, capabilities: ['serial'] });
+  const adapter = await connectAdapterTo(limited);
+  // 页面必须给被接受的请求回帧。少了它，前两个请求会被正常转发却永不应答，
+  // 适配器只会收到第 3 个请求的限流拒绝，下面的 3 次读会在不存在的第 2、3 条上
+  // 各白等 2 秒后超时，断言根本走不到（实测证据见 task-5-report.md）。
+  // 反过来，前两条读到 ok、第三条读到 INVALID_ARGS，也就正向证明了
+  // "被接受的两个确实被转发执行，只有超配额的那个被拒"，比只数错误码更强。
+  page.on('message', d => {
+    const m = JSON.parse(d.toString());
+    if (m.kind === 'req') send(page, P.makeRes(m.id, {}));
+  });
+
+  const results = [];
+  // 逐个发、逐个读：一次只让一帧在路上。若三条一起发，页面会批处理两个请求、
+  // 两条回帧落在同一个事件循环 tick 里，而"读一条→重建 once 监听"之间
+  // 后到的那帧会被静默丢弃，测试就成了看运气。
+  for (let i = 0; i < 3; i++) {
+    send(adapter, P.makeReq(`r-40${i}`, 'serial', 'status', {}));
+    results.push(await nextMessage(adapter));
+  }
+  // 限流复用 INVALID_ARGS 而非新增 RATE_LIMITED：spec 第 4.5 节的错误码是固定的
+  // 9 项清单，T1 的测试逐项断言了该清单，新增码会破坏它。
+  // 面向模型的可读提示由 message 承担（"请求过于频繁（上限 N 次 / M ms）"）。
+  const codes = results.filter(r => !r.ok).map(r => r.error.code);
+  assert.deepStrictEqual(codes, ['INVALID_ARGS'],
+    '第 3 个请求应被限流拒绝（码复用 INVALID_ARGS，理由见上）');
+
+  page.close(); adapter.close();
+});
+
+test('页面断开时挂起的请求被清理', async () => {
+  const page = await connectPage();
+  send(page, { kind: 'hello', role: 'page', pageId: 'p-drop', protocolVersion: 1, capabilities: ['serial'] });
+  await new Promise(r => setTimeout(r, 30));
+  const adapter = await connectAdapter();
+  send(adapter, P.makeReq('r-500', 'serial', 'read', {}));
+  await new Promise(r => setTimeout(r, 30));
+  assert.strictEqual(bridge.getStats().pending, 1);
+  page.close();
+  await new Promise(r => setTimeout(r, 50));
+  assert.strictEqual(bridge.getStats().pending, 0);
+  adapter.close();
+});
+
+test('速率限制是固定窗口而非永久计数器：窗口过后配额恢复', async (t) => {
+  // 简报的限流用例窗口是 10s，窗口在用例期间根本不会滚过——
+  // 于是"永久计数器"也能让它通过（实测：删掉 allowRequest 里的窗口重置后，
+  // 只靠简报那条限流用例仍全绿）。拿一个短窗口把重置真的走一遍，
+  // 否则"这是窗口不是计数器"只是注释里的一句声明。
+  const inst = await attachBridgeOnNewServer({ rateLimit: { max: 2, windowMs: 400 } });
+  t.after(async () => { await inst.teardown(); });
+
+  const page = await connectPageTo(inst, { kind: 'hello', role: 'page', pageId: 'p-window', protocolVersion: 1, capabilities: ['serial'] });
+  page.on('message', d => {
+    const m = JSON.parse(d.toString());
+    if (m.kind === 'req') send(page, P.makeRes(m.id, {}));
+  });
+  const adapter = await connectAdapterTo(inst);
+
+  // 逐个发、逐个读：一次只让一帧在路上（理由同限流用例）
+  send(adapter, P.makeReq('r-700', 'serial', 'status', {}));
+  assert.strictEqual((await nextMessage(adapter)).ok, true, '窗口内第 1 个应放行');
+  send(adapter, P.makeReq('r-701', 'serial', 'status', {}));
+  assert.strictEqual((await nextMessage(adapter)).ok, true, '窗口内第 2 个应放行');
+  send(adapter, P.makeReq('r-702', 'serial', 'status', {}));
+  const denied = await nextMessage(adapter);
+  assert.strictEqual(denied.ok, false, '窗口配额用尽后应拒绝');
+  assert.strictEqual(denied.error.code, 'INVALID_ARGS');
+
+  // 睡过一个窗口（400ms）再发：计数器若是永久的，这里会一直被拒
+  await new Promise(r => setTimeout(r, 600));
+  send(adapter, P.makeReq('r-703', 'serial', 'status', {}));
+  assert.strictEqual((await nextMessage(adapter)).ok, true,
+    '窗口应重置、配额恢复；永久计数器会在这里永远拒绝');
+
+  page.close(); adapter.close();
+});
+
+test('close() 撤掉挂起请求的定时器，不留计时器比桥活得久', async (t) => {
+  // 简报的 5 个用例都碰不到这条路径：超时用例里请求表已自己清空，
+  // 断开用例里是页面 close 触发的清理。页面仍连着时调用 close()，是唯一能
+  // 把 close() 自身的清理单独隔离出来的场景。
+  // 漏撤的后果不是断言失败而是进程被拖住——默认 10s 的超时会白等完才退，
+  // 正是"反挂死"要防的那类缺陷，所以必须显式断言，不能靠"跑得挺快"去推断。
+  // 用 timeoutMs 拉长到 60s：定时器若被撤掉就不该在资源表里；若没撤掉，
+  // 这条断言失败而不是让整条命令等满 60s。
+  const inst = await attachBridgeOnNewServer({ timeoutMs: 60000 });
+  t.after(async () => { await inst.teardown(); });
+  // 未 unref 的 Timeout 才会出现在这张表里（unref 过的不会拖住事件循环），
+  // 正好用来断言"桥的定时器有没有被撤掉"
+  const activeTimers = () => process.getActiveResourcesInfo().filter(r => r === 'Timeout').length;
+
+  const page = await connectPageTo(inst, { kind: 'hello', role: 'page', pageId: 'p-close', protocolVersion: 1, capabilities: ['serial'] });
+  const adapter = await connectAdapterTo(inst);
+
+  const before = activeTimers();
+  send(adapter, P.makeReq('r-600', 'serial', 'read', {}));
+  await new Promise(r => setTimeout(r, 50));
+  assert.strictEqual(inst.bridge.getStats().pending, 1);
+  assert.strictEqual(activeTimers(), before + 1, '每个挂起请求应带一个超时定时器');
+
+  inst.bridge.close();
+  assert.strictEqual(inst.bridge.getStats().pending, 0, 'close() 后请求表应清空');
+  assert.strictEqual(activeTimers(), before, 'close() 必须撤掉挂起请求的定时器，否则计时器比桥活得久');
+
+  page.terminate(); adapter.terminate();
 });
