@@ -4240,17 +4240,17 @@ function modbusSend() {
   if (!hasWriter) { showNotification('Modbus: 串口未连接', 'error'); return; }
   const slaveId = parseInt(document.getElementById('mbSlaveId').value);
   const funcCode = parseInt(document.getElementById('mbFuncCode').value);
-  if (isNaN(slaveId) || slaveId < 1 || slaveId > 247) { appendLine('[Modbus] 从站 ID 必须在 1-247 之间', 'error'); return; }
+  if (isNaN(slaveId) || slaveId < 1 || slaveId > 247) { appendLine('err', '[Modbus] 从站 ID 必须在 1-247 之间'); return; }
   const quantity = parseInt(document.getElementById('mbQuantity').value);
-  if (isNaN(quantity) || quantity < 1 || quantity > 2000) { appendLine('[Modbus] 数量必须在 1-2000 之间', 'error'); return; }
+  if (isNaN(quantity) || quantity < 1 || quantity > 2000) { appendLine('err', '[Modbus] 数量必须在 1-2000 之间'); return; }
   const address = modbusParseAddress();
-  if (isNaN(address) || address < 0 || address > 65535) { appendLine('[Modbus] 地址无效', 'error'); return; }
+  if (isNaN(address) || address < 0 || address > 65535) { appendLine('err', '[Modbus] 地址无效'); return; }
   let writeData = null;
   if (funcCode === 5 || funcCode === 6 || funcCode === 15 || funcCode === 16) {
     const raw = document.getElementById('mbWriteData').value.trim();
-    if (!raw) { appendLine('[Modbus] 请输入写入数据', 'error'); return; }
+    if (!raw) { appendLine('err', '[Modbus] 请输入写入数据'); return; }
     const b = raw.split(/[\s,]+/).map(s => parseInt(s, 16));
-    if (b.some(v => isNaN(v) || v < 0 || v > 255)) { appendLine('[Modbus] 写入数据格式无效', 'error'); return; }
+    if (b.some(v => isNaN(v) || v < 0 || v > 255)) { appendLine('err', '[Modbus] 写入数据格式无效'); return; }
     writeData = funcCode <= 6 ? (b[0] << 8 | b[1]) : new Uint8Array(b);
   }
   const frame = modbusConstructFrame(slaveId, funcCode, address, quantity, writeData);
@@ -4267,7 +4267,7 @@ function modbusSend() {
   targetWriter.write(frame).then(() => {
     modbusSendTime = Date.now();
     if (typeof modbusStartWait === 'function') modbusStartWait(frame);
-  }).catch(err => appendLine('[Modbus] 发送失败: ' + err.message, 'error'));
+  }).catch(err => appendLine('err', '[Modbus] 发送失败: ' + err.message));
 }
 
 // Modbus response parser

@@ -375,3 +375,117 @@ test('离开 independent 模式会断开 Modbus 独立串口（PORT_BUSY 文案�
     'modbusDisconnectPort 必须关闭 modbusPort，"腾出端口"才成立');
 });
 
+// ════════════════════════════════════════════════════════
+// 八、appendLine 调用形态的防护
+//
+// appendLine(type, text, autoScroll) 的 type 一身三职：拼进 CSS 类名
+// （line.className / line-dir / line-content）、门控时间戳（type !== 'sys'），
+// 而 text 又经函数末尾的输出钩子进入桥的 AI 读缓冲。
+// 两个实参一旦写反（appendLine('<消息>', 'error')），后果是三重且都不报错：
+//   1) 类名变成消息文本，样式全部落空；
+//   2) 本该显示消息的位置收到字面量 'error'，真正的消息丢失；
+//   3) AI 读缓冲里躺着的也是 'error'，它看到的是错误信息本身而非内容。
+// 这里钉的是调用形态，不是文案：消息内容可以随时改，首个实参的取值域不行。
+// ════════════════════════════════════════════════════════
+
+const BACKSLASH = String.fromCharCode(92); // 反斜杠，避免多层转义
+
+/** 跳过一段字符串字面量（含转义），返回收尾引号的下标 */
+function skipString(src, i, quote) {
+  for (let j = i + 1; j < src.length; j++) {
+    if (src[j] === BACKSLASH) { j++; continue; }
+    if (src[j] === quote) return j;
+  }
+  return src.length - 1;
+}
+
+/** 跳过一段模板字面量，${ } 内的嵌套字符串/花括号一并跳过 */
+function skipTemplate(src, i) {
+  for (let j = i + 1; j < src.length; j++) {
+    if (src[j] === BACKSLASH) { j++; continue; }
+    if (src[j] === '`') return j;
+    if (src[j] === '$' && src[j + 1] === '{') {
+      let depth = 1;
+      j += 2;
+      while (j < src.length && depth > 0) {
+        const c = src[j];
+        if (c === BACKSLASH) { j += 2; continue; }
+        if (c === "'" || c === '"') { j = skipString(src, j, c); }
+        else if (c === '{') { depth++; }
+        else if (c === '}') { depth--; }
+        j++;
+      }
+      j--;
+    }
+  }
+  return src.length - 1;
+}
+
+/**
+ * 按 JS 词法取出一对圆括号内「首个顶层实参」的源码文本。
+ * 跟踪圆括号/方括号/花括号深度与字符串、模板字面量状态，
+ * 因此跨行调用、以及实参里含逗号（数组、对象、模板串）都能正确切分。
+ */
+function readFirstArg(src, start) {
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    const c = src[i];
+    if (c === '"' || c === "'") { i = skipString(src, i, c); continue; }
+    if (c === '`') { i = skipTemplate(src, i); continue; }
+    if (c === '/' && src[i + 1] === '/') { const nl = src.indexOf('\n', i); i = nl < 0 ? src.length : nl; continue; }
+    if (c === '/' && src[i + 1] === '*') { const end = src.indexOf('*/', i + 2); i = end < 0 ? src.length : end + 1; continue; }
+    if (c === '(' || c === '[' || c === '{') { depth++; continue; }
+    if (c === ')' || c === ']' || c === '}') { if (depth === 0) return src.slice(start, i).trim(); depth--; continue; }
+    if (c === ',' && depth === 0) return src.slice(start, i).trim();
+  }
+  return src.slice(start).trim();
+}
+
+/**
+ * 枚举源码里全部 appendLine() 调用点。
+ * 匹配 `appendLine` + 可选空白 + `(`（因此跨行调用不会被漏掉），
+ * 并跳过 `function appendLine(` 定义本身——那里的首参是形参而非类型令牌。
+ * 注意：取不到实参时返回空串，会被下面的断言当作违规，是 fail-closed 的。
+ */
+function enumerateAppendLineCalls(src) {
+  const calls = [];
+  const re = /appendLine\s*\(/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (/function\s+$/.test(src.slice(Math.max(0, m.index - 12), m.index))) continue;
+    calls.push({
+      line: src.slice(0, m.index).split('\n').length,
+      arg: readFirstArg(src, m.index + m[0].length),
+    });
+  }
+  return calls;
+}
+
+test('appendLine 调用的首个实参必须是已知类型令牌', () => {
+  // 取值域来自 appendLine 内实际分派的类型：dirMap = { rx, tx, sys, err }。
+  // 没有 'error' 这个类型——旧代码把它当第二实参传，才没能拦住写反。
+  const KNOWN_TYPES = ['sys', 'rx', 'err', 'tx'];
+
+  // 非字面量首参的显式豁免：新增此类调用点必须在此登记，否则本测试失败。
+  // printWelcome() 用一张 [{type,text}] 表批量输出欢迎语，type 来自表数据
+  // （该表字面量见其函数体，取值仅 'sys'/'rx'），无法在此静态求值。
+  const NON_LITERAL_EXEMPT = ['l.type'];
+
+  const calls = enumerateAppendLineCalls(html);
+
+  // 兜底：枚举器若失效（正则写坏、文件读取为空），下面的 violations 会空集通过。
+  // 用调用点数量下限挡住这种"假绿灯"。
+  assert.ok(calls.length >= 20,
+    `枚举到的 appendLine 调用点过少（${calls.length}），枚举器可能已失效`);
+
+  const violations = calls.filter(c => {
+    const literal = /^'([^']*)'$/.exec(c.arg);
+    if (literal) return !KNOWN_TYPES.includes(literal[1]);
+    return !NON_LITERAL_EXEMPT.includes(c.arg); // 非字面量：只认显式豁免
+  }).map(c => `第 ${c.line} 行 appendLine(${c.arg}, ...)`);
+
+  assert.deepStrictEqual(violations, [],
+    '首个实参只能是 ' + KNOWN_TYPES.join('/') + ' 之一；' +
+    '写成 appendLine(\'<消息>\', \'error\') 会把消息当类名、正文变成字面量 error（并喂进 AI 读缓冲）');
+});
+
