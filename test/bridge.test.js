@@ -182,3 +182,36 @@ test('两条鉴权路径不可互相绕过：正确 token + 非法 Origin 仍被
   // 因此"持有正确 token"不能成为绕过 Origin 校验的通行证
   await assertUpgradeRejected(() => connectAdapter({ origin: 'http://evil.example.com' }));
 });
+
+test('关停：未送 hello 的 page socket 不得让 server.close() 挂住', async () => {
+  // 自起一套 server + bridge：本用例会把 server 关掉，若借用共享 fixture 就得依赖
+  // 测试声明顺序，还会连累 after 钩子
+  const srv = http.createServer((_req, res) => res.writeHead(404).end());
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+  const own = attachBridge(srv, {
+    token: TOKEN, isTrustedOrigin, isLocalHostname, hostnameOf,
+    getActualPort: () => srv.address().port,
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  // 泄漏形态：page 角色却从未送 hello——既不在 state.adapters 里，state.page 也仍是 null，
+  // 按角色遍历的旧 close() 两边都够不着，于是这个 socket 永远挂着
+  const ws = new WebSocket(`ws://127.0.0.1:${p}/bridge`, { origin: `http://localhost:${p}` });
+  await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+
+  try {
+    own.close();
+    // unref：赢了之后计时器不该继续占着事件循环。
+    // 旧实现下 server.close() 真的永不回调，所以这里必须以干净的断言失败收场，不能挂住
+    const outcome = await Promise.race([
+      new Promise(r => srv.close(() => r('已关闭'))),
+      new Promise(r => setTimeout(() => r('超时：server.close() 未回调'), 2000).unref()),
+    ]);
+    assert.strictEqual(outcome, '已关闭',
+      'close() 必须关掉未送 hello 的 page socket，否则 server.close() 永不回调');
+  } finally {
+    // 失败路径上这条连接还活着：不收尾，整个测试进程就退不出去
+    try { ws.terminate(); } catch {}
+  }
+});
