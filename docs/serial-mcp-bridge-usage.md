@@ -13,7 +13,7 @@ Claude Code ──stdio──► mcp-server.js ──ws://127.0.0.1:1982/bridge�
                                                                      浏览器页面 ──► Web Serial ──► 串口
 ```
 
-桥挂在 `server.js` 里，所以它与页面**同生共死**，不需要额外的常驻进程。多个 AI 会话各起一个适配器连同一个桥，不会抢端口。
+桥挂在 `server.js` 里，所以它与**静态服务同生共死**——进程没了桥就没了，而页面可以比它活得久（见 §六.G：停掉 `server.js` 页面仍能当终端用）。不需要额外的常驻进程。多个 AI 会话各起一个适配器连同一个桥，不会抢端口。
 
 ---
 
@@ -104,14 +104,15 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 | 读输出（按游标取增量） | `serial_read` |
 | 清屏 / 暂停 / 继续 | `ui_action {action:"clear"\|"pause"\|"resume"}` |
 | Modbus 模式、连接、启停轮询 | `modbus_control` |
-| 发一条 Modbus 请求并拿解析结果 | `modbus_request` |
+| 发一条 Modbus 请求并拿结果（原始 TX/RX 帧） | `modbus_request` |
+| 看 Modbus 历史报文 | `modbus_log` |
 | 主题 / 字体 / 侧栏 / 宏 / 存日志 | `ui_action` |
 | 看终端**实际渲染**的颜色与行 | `ui_inspect` |
 | 无硬件跑通全链路 | `dev_serial` |
 
 ### 读取必须用游标，且必须看 `dropped`
 
-`serial_read` 要传入上次返回的 `cursor`。**`dropped > 0` 表示输出量超过环形缓冲、那段数据已永久丢失**——此时不要假设输出是连续的。`truncated: true` 表示本次被 `max` 截断，用返回的 `cursor` 继续读。
+`serial_read` **首次调用不传 `cursor`**（从最旧可用位置开始），之后要传入上次返回的 `cursor`。**`dropped > 0` 表示输出量超过环形缓冲、那段数据已永久丢失**——此时不要假设输出是连续的。`truncated: true` 表示本次被 `max` 截断，用返回的 `cursor` 继续读。
 
 ---
 
@@ -143,7 +144,7 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 | `BRIDGE_TIMEOUT` | 页面未在时限内响应 | 检查页面是否卡住 |
 | `PORT_NOT_CONNECTED` | 端口未打开 | 先 `serial_connect` |
 | `NOT_ARMED` | 武装开关未开 | 请用户在页面上打开开关 |
-| `INVALID_ARGS` | 参数有误（或限流 / id 冲突） | 看消息里的具体原因 |
+| `INVALID_ARGS` | 参数有误（或限流 / id 冲突 / 请求表超限） | 看消息里的具体原因 |
 | `OP_UNSUPPORTED` | 页面不支持该域/操作 | 让用户刷新页面 |
 | `PAGE_ERROR` | 页面内部错误 | 把消息转告用户 |
 
@@ -151,7 +152,7 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 
 ## 六、必须真人做的验证清单
 
-> 以下需要**真实 Chrome/Edge 标签页 + 真人点击 + 真实串口设备**，自动化环境无法覆盖。
+> 以下需要**真实浏览器（Chrome/Edge 标签页）+ 真人点击**，自动化环境无法覆盖。硬件需求按节而异：**D、E 明确无需硬件**（各节前置里已写明）；**F、以及 B 的连设备一步需要真实串口设备**；A、C、G 只需服务端与页面。
 > 已在测试中以替身尽可能覆盖，但下面这些**只能由人确认**。请按序执行，每步都有期望值。
 
 ### A. 前置（必做，否则后面全部会被误导）
@@ -199,7 +200,11 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 
 **为什么要单列**：D 表只走到 `serial_send` / `serial_read` / `set_mode`，而风险最高的行为——**`shared` 模式到底能不能收到 Modbus 响应**——在自动化里恰好被跳过（测试沙箱里 `modbusFeedResponse` 是空函数）。代码里"`shared` 模式下拒绝 `modbus_request`"这条前置**所依据的前提本身，只有真机能证实**。
 
-**第一步：在页面里直接验前提（不经过 AI，绕开新加的守卫）**
+**前置（同 D，但这里漏了会误判）**：`npm install` → `npm start` → 开页面 → 确认 C 无告警 → **打开「允许 AI 写入」** → `/mcp` 确认 `webterm-serial` 已连接。
+
+> 武装开关这一步在 E 节尤其不能漏：第 2 步的 `modbus_control` 与第 4 步的 `modbus_request` 都是**写入类**操作，未开开关时它们会在写审计之前就被拦下，返回一条**光秃秃的 `NOT_ARMED`**——终端里既不出现意图行、也没有 `✖ 失败` 行，看起来就像工具坏了。
+
+**第一步：在页面里直接验前提（这一步的发送在页面里手点，不经过 AI，从而绕开 `modbus_request` 的守卫）**
 
 1. 先连上该串口
 2. `modbus_control {action:"set_mode", mode:"shared"}` → `modbus_control {action:"activate"}`
@@ -215,7 +220,8 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 4. `modbus_request {slaveId:1, funcCode:3, address:0, quantity:1}`
    - **期望**：**立刻**返回参数错误（不再等 500ms、不再出现"设备没响应"），终端留下"意图 + `✖ 失败`"两条 `[AI]` 记录
 5. `modbus_control {action:"set_mode", mode:"independent"}` → `{action:"connect"}` → 重发第 4 步
-   - **期望**：正常返回寄存器值（HEX/U16/I16/F32 全格式）、`responseTimeMs`、完整 TX/RX 帧
+   - **期望**：`outcome:"success"`，并带完整 TX/RX 帧（`txHex`/`rxHex`）、`pduHex`、`responseTimeMs`、`slaveId`、`funcCode`
+   - **注意**：返回的是**原始帧 + PDU，不是解析后的寄存器值**（也没有线圈位图）。要读寄存器得自己解 `pduHex`——功能码 03/04 的 `pduHex` 首字节是字节数，其后每 2 字节一个寄存器。多格式（HEX/U16/I16/F32）渲染只存在于页面自己的表格里，MCP 工具不上报它。
 6. `modbus_control {action:"deactivate"}` → 终端输入框恢复可用
 
 ### F. 真实硬件
@@ -235,7 +241,7 @@ Web Serial 的 `requestPort()` **每次都弹选择框、且必须由用户手�
 
 ## 七、已知限制
 
-- **AI 免手势重连未经实测**（见第二节末尾）。这是本次交付里唯一被明确标注为"未验证"的假设。
+- **AI 免手势重连未经实测**（见第二节末尾）。它是本次交付里被明确标注为「未验证」的假设之一——§六.B（真人点「连接」是否仍弹选择框）与 §六.E（`shared` 模式能否收到响应）同样只能靠真机/真实浏览器确认，三条的验证步骤都在第六节。
 - **`pause` 会丢数据**（见第四节）。
 - **`modbus_request` 在 `shared` 模式下不可用**（见第四节）。
 - **AI 写入无逐次确认门**：这是刻意的取舍，补偿控制是武装开关 + 全量 `[AI]` 审计日志。请按需开关。

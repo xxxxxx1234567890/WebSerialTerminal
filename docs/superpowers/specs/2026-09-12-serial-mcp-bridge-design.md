@@ -215,7 +215,7 @@ Claude Code ──stdio──► mcp-server.js ──bridge 消息──► brid
 | | `set_mode` | `shared` / `independent`（复用 `modbusSetMode`） |
 | | `connect` / `disconnect` | independent 模式（复用 `modbusConnectPort`） |
 | | `activate` / `deactivate` | shared 模式；响应**必须说明终端已被冻结** |
-| | `request` | 语义化：`{ slaveId, funcCode, address, quantity, writeData }` → 多格式寄存器值 / 线圈位图 / 异常码 / 响应时间。**仅 independent 模式**：shared 模式冻结终端读循环，响应在解析前就被丢弃，故直接拒绝而不是发出去等超时 |
+| | `request` | 语义化：`{ slaveId, funcCode, address, quantity, writeData }` → 原始 TX/RX 帧 + `pduHex` + 异常码 + 响应时间（**不解析寄存器值、不给线圈位图**，见下方修订记录）。**仅 independent 模式**：shared 模式冻结终端读循环，响应在解析前就被丢弃，故直接拒绝而不是发出去等超时 |
 | | `cycle_start` / `cycle_stop` / `log` | 轮询控制与历史报文 |
 | `ui` | `set_theme` / `set_font` / `toggle_sidebar` / `run_macro` / `list_macros` / `save_log` | 复用现有函数 |
 | | `clear` / `pause` / `resume` | 视图状态操作，复用 `clearTerminal()` / `togglePause()` |
@@ -227,9 +227,20 @@ Claude Code ──stdio──► mcp-server.js ──bridge 消息──► brid
 
 `fake_script` 是把假串口从"手动喂字节"升级为"模拟一台真设备"的关键——使完整的 Modbus 往返可无硬件闭环。
 
-> 修订记录（终审）：`request` 原设计的 `format` 参数**未实现**——改为总返回全格式
-> （HEX/U16/I16/F32 一次给全）。理由：多一次往返只换来模型自己也能做的格式转换，
-> 而"少一次调用"对上下文与失败面都是净收益。工具描述已同步说明。
+> 修订记录（终审，文档纠错后重写）：`request` 原设计的 `format` 参数**未实现**；但也**不是**
+> 本行先前所写的"改为总返回全格式（HEX/U16/I16/F32 一次给全）"——那句话与实现不符。
+> 实现（`bridge-client.js` 的 `modbus.request`）返回的是：
+> `{ txHex, outcome, rxHex, responseTimeMs, slaveId, funcCode, pduHex }`，
+> **原始 TX/RX 帧与 PDU，没有任何解析后的寄存器值，也没有线圈位图**。异常时以
+> `exceptionCode` / `exceptionText` 取代 `funcCode` / `pduHex`（`slaveId` 仍在）；
+> 超时时只回 `txHex` / `outcome` / `note`。多格式渲染只存在于页面自己的 DOM 表格
+> （`WebSerialTerminal.html` 的 `modbusShowParsedData()`，属于本次改动之前就存在的
+> Modbus 调试面板），**MCP 工具从不上报它**。解码留给调用方：寄存器字节在 `pduHex` 里，
+> 功能码 03/04 的首字节是字节数，其后每 2 字节一个寄存器。
+>
+> 本次一并改正原句"**工具描述已同步说明**"：那句话断言的一致性当时并不存在——描述里
+> 写的是同一套多格式承诺。现已真正同步：`mcp-server.js` 的 `modbus_request` 描述、
+> `serial-mcp-bridge.md` §8 工具表、使用说明 §六.E 均已改为"返回原始帧、解码在调用方"。
 
 > 另两处与本文的偏离，实现为准（终审收口）：
 > - §5.5 的武装开关**存独立的 `wtp_ai_armed` 键**，不塞进 `wtp_settings`：武装是安全状态，

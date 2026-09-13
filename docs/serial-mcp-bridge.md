@@ -277,9 +277,13 @@ PORT=3000 npm start
 | `拒绝连接：非法 Host` | `Host` 头不是本机（DNS rebinding 防线） |
 | `拒绝连接：token 无效` | 适配器没带或不匹配 token，见 7.1 |
 | `协议版本不匹配：页面 X，桥 1` | 页面与服务端版本不一致，刷新页面 |
-| `/bridge` 返回 404 | 服务端没挂上桥——多半是没 `npm install`，看启动日志的 `[bridge] AI 桥不可用：…` |
+| 启动日志出现 `[bridge] AI 桥不可用：…` | 桥没挂上——多半是没 `npm install`。按那行日志里写的原因处理 |
 
 注意 `/bridge` **只接受** `ws://127.0.0.1:1982/bridge`（或 `localhost`）——服务端只绑回环地址，局域网内其他机器连不上，这是刻意设计。
+
+> ⚠️ **不要拿 `curl http://127.0.0.1:1982/bridge` 的 404 当判据。** 无论 1982 上跑的是哪一版、桥有没有挂上，它**都是 404**：`server.js` 的 HTTP 处理器只特判 `/api/save-log`，其余交给静态文件服务，而 `/bridge` 没有对应文件；何况 `/bridge` 只接受 WebSocket **升级**请求，桥没挂上时进程里**根本没有 `upgrade` 监听器**——按 Node 的约定，无人监听 `upgrade` 的连接会被直接关闭，同样不是「404 应答」。这个 404 区分不出是哪一版在跑。
+>
+> 正确的判据只有两个：**起第二个 `npm start` 看它是否报「端口 1982 已被占用」**（见 §7.2；报了就说明 1982 上有进程，再去查它是哪一版），或者**直接查占用端口的进程**。`PAGE_NOT_CONNECTED` 而适配器看起来连上了，正是旧版 `server.js` 占着端口的典型症状，排查入口在 §7.2。
 
 ### 7.5 服务端重启后
 
@@ -300,7 +304,7 @@ PORT=3000 npm start
 | `serial_send` | 发数据（`ascii` / `hex` / `base64`），记入 `[AI]` 审计 |
 | `serial_read` | 按游标拉取增量输出，含 `dropped` / `truncated` |
 | `modbus_control` | 模式切换、连断、启停、轮询控制 |
-| `modbus_request` | 语义化 Modbus RTU 请求（CRC 自动计算，寄存器多种格式**一次全给**，无需再指定 `format`）。**只在 independent 模式下可用**，见下方说明 |
+| `modbus_request` | 语义化 Modbus RTU 请求（CRC 自动计算）。返回**原始 TX/RX 完整帧 + `pduHex` + `responseTimeMs` + `slaveId`/`funcCode`/`outcome`（异常时给 `exceptionCode`/`exceptionText`）**；**不解析寄存器值、也不给线圈位图**，解码由调用方按功能码自行完成（03/04 的 `pduHex` 首字节是字节数，其后每 2 字节一个寄存器）。**只在 independent 模式下可用**，见下方说明 |
 | `modbus_log` | Modbus 历史报文 |
 | `ui_action` | 清屏、暂停、主题、字号、宏、保存日志 |
 | `ui_inspect` | 终端**实际渲染结果**（行文本 + 计算后颜色），验证 ANSI 解析/高亮的手段 |
