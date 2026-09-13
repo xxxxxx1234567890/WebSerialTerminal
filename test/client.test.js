@@ -209,14 +209,30 @@ test('已移除 escapeJs（只转义单引号，易被误用为属性转义）',
 // 四、串口 seam 回归防护
 //
 // AI 桥的假串口方案依赖"所有串口都经 serialProvider 获取"这条不变式。
-// 后续若有人图省事写回 navigator.serial.requestPort()，这条测试必须立刻变红——
-// 否则假设备会静默失效，测试却依然全绿。
+// 后续若有人图省事在 seam 之外新写一处 navigator.serial.requestPort()，这条测试必须
+// 立刻变红——否则假设备会静默失效，测试却依然全绿。
+// 注意它的边界：本组断言抓的是"净增一处直调"与"seam 被掏空却仍留着直调"。
+// 完整回退（seam 整个删掉 + 两个调用点写回）会让命中数仍是 2，单看计数分辨不出，
+// 要靠下面"两处取端口都改走 serialProvider"那条来抓。
 // ════════════════════════════════════════════════════════
 
 test('navigator.serial 只在 seam 定义处被引用', () => {
+  // 只数个数是不够的：完整回退（seam 整个删掉 + 两个调用点写回直调）同样是 2 次命中，
+  // 光看总数分辨不出。因此这里额外验证这 2 次命中确实落在 seam 块内部——
+  // 防的是"净增一处直调"和"seam 被掏空但仍留下 2 个裸调用"两种退化。
+  const a = html.indexOf('window.realSerialProvider');
+  assert.ok(a > 0, '应存在 realSerialProvider seam 定义');
+  const b = html.indexOf('let serialProvider = window.realSerialProvider;', a);
+  assert.ok(b > a, 'seam 应以 let serialProvider = window.realSerialProvider; 收尾');
+  const seam = html.slice(a, b);
+
+  const inSeam = seam.match(/navigator\.serial\.[A-Za-z]+\s*\(/g) || [];
+  assert.strictEqual(inSeam.length, 2,
+    'seam 内应恰有 requestPort 与 getPorts 两处引用，实际: ' + inSeam.join(' | '));
+
   const hits = html.match(/navigator\.serial\.[A-Za-z]+\s*\(/g) || [];
-  assert.strictEqual(hits.length, 2,
-    '应只有 serialProvider 定义处的 requestPort 与 getPorts，实际: ' + hits.join(' | '));
+  assert.strictEqual(hits.length, inSeam.length,
+    'seam 之外不得再直调 navigator.serial，实际: ' + hits.join(' | '));
 });
 
 test('serialProvider 声明为可重新赋值（let，而非 const）', () => {
