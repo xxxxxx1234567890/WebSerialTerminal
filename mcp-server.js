@@ -269,18 +269,30 @@ function createBridgeClient() {
         p.resolve(msg);
       });
       ws.on('close', () => {
-        state.ws = null;
-        for (const [, p] of state.pending) p.reject(new Error('桥连接已断开'));
-        state.pending.clear();
-        // 这个重连计时器没有清零点（它本身就是等待下一次尝试），不 unref 的话
-        // 一次断线就能让进程再也退不掉。unref 后进程仍由 stdin 持有，重连照常。
-        // 注意不能写成 setTimeout(ensure, ...).catch(...)：setTimeout 返回的是
-        // Timeout 对象而非 Promise，那个 .catch 会在 close 处理器里抛
-        // TypeError，把整个 MCP 进程带崩（重连也就永远停在第一级退避）。
-        // 必须在回调里显式调用 ensure() 并吞掉它的 rejection——否则 token 缺失
-        // 时的拒绝会变成 unhandledRejection，同样致命。
-        setTimeout(() => { ensure().catch(() => {}); }, state.retryMs).unref();
-        state.retryMs = Math.min(state.retryMs * 2, 10000);
+        // 只有【当前连接】关闭才清空 state.ws 并失败在途请求。一个已被取代的
+        // socket 无权处置这些：桥重启时 A 进入 CLOSING（close 尚未派发）、
+        // 此刻到来的请求另建 B，随后 A 的 close 才触发——若无条件执行，A 会把
+        // state.ws 清成 null 并 reject 掉跑在 B 上的请求（症状还会自我复制：
+        // 下一个请求再建 C，B 沦为真正的孤儿，它关闭时又去弄挂 C）。
+        if (state.ws === ws) state.ws = null;
+        if (!state.ws) {
+          for (const [, p] of state.pending) p.reject(new Error('桥连接已断开'));
+          state.pending.clear();
+          // 重连只能排在这里：它的条件是"当前没有可用连接"。首次连不上桥时该
+          // socket 从未 open、state.ws 恒为 null——若改写成像
+          // `if (state.ws !== ws) return;` 那样的身份早退，这条最常见的故障恢复
+          // 路径会被整个跳过，客户端将永远不再重试。
+          //
+          // 这个计时器没有清零点（它本身就是等待下一次尝试），不 unref 的话
+          // 一次断线就能让进程再也退不掉。unref 后进程仍由 stdin 持有，重连照常。
+          // 注意不能写成 setTimeout(ensure, ...).catch(...)：setTimeout 返回的是
+          // Timeout 对象而非 Promise，那个 .catch 会在 close 处理器里抛
+          // TypeError，把整个 MCP 进程带崩（重连也就永远停在第一级退避）。
+          // 必须在回调里显式调用 ensure() 并吞掉它的 rejection——否则 token 缺失
+          // 时的拒绝会变成 unhandledRejection，同样致命。
+          setTimeout(() => { ensure().catch(() => {}); }, state.retryMs).unref();
+          state.retryMs = Math.min(state.retryMs * 2, 10000);
+        }
       });
       ws.on('error', err => {
         clearTimeout(timer);

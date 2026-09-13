@@ -112,6 +112,7 @@ function startBridgeStub() {
   const ids = [];
   const handshakes = [];
   let connections = 0;
+  let rejectNext = 0;
 
   const server = http.createServer((_req, res) => res.writeHead(404).end());
   const wss = new WebSocketServer({ noServer: true });
@@ -122,6 +123,13 @@ function startBridgeStub() {
     const origin = req.headers.origin;
     const tokenOk = req.headers['x-webterm-token'] === TOKEN;
     handshakes.push({ origin, tokenOk });
+    // 人为拒绝前 N 次握手：用来造"连接失败（socket 从未 open）"这条路径
+    if (rejectNext > 0) {
+      rejectNext--;
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     if (origin || !tokenOk) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
@@ -151,6 +159,8 @@ function startBridgeStub() {
       ids,
       handshakes,
       connectionCount: () => connections,
+      /** 让接下来 n 次握手被 403 拒掉：造出"socket 从未 open"的连接失败 */
+      rejectNextAttempts: n => { rejectNext = n; },
       /** 从服务端踢掉适配器连接，等价于 server.js 重启 / 页面刷新导致的桥断线 */
       dropClients: () => { for (const ws of sockets) ws.terminate(); },
       teardown: async () => {
@@ -176,6 +186,60 @@ function waitFor(pred, timeoutMs) {
     };
     tick();
   });
+}
+
+/** 让已排队的微任务全部跑完。断言在 reject 传播之前执行会假绿 */
+const drainMicrotasks = () => new Promise(r => setImmediate(r));
+
+/**
+ * 可控的 fake WebSocket，用来把"CLOSING 中的 A 被 B 取代、A 的 close 随后才派发"
+ * 这一时序变成确定的。
+ *
+ * 真实 ws 的这个窗口只有几微秒（readyState 置 2 之后 close 事件紧随其后），
+ * 想稳定复现只能靠 sleep 撞运气——那正是不可接受的测试。换成 fake 之后，
+ * open/close/message 全部由测试驱动，时序不再依赖运气。
+ */
+function makeFakeSocketClass() {
+  const created = [];
+  class FakeWebSocket {
+    constructor(url, opts) {
+      this.url = url;
+      this.opts = opts;
+      this.readyState = 0;        // CONNECTING
+      this.sent = [];
+      this.handlers = new Map();
+      created.push(this);
+    }
+    on(ev, fn) {
+      if (!this.handlers.has(ev)) this.handlers.set(ev, []);
+      this.handlers.get(ev).push(fn);
+      return this;
+    }
+    emit(ev, ...args) { for (const fn of this.handlers.get(ev) || []) fn(...args); }
+    send(s) { this.sent.push(s); }
+    terminate() { this.readyState = 3; }
+    // —— 以下由测试驱动，不是 ws 的 API ——
+    open() { this.readyState = 1; this.emit('open'); }
+    deliver(obj) { this.emit('message', JSON.stringify(obj)); }
+  }
+  return { FakeWebSocket, created };
+}
+
+/**
+ * 用 fake 顶替 'ws' 再取一份 mcp-server 实例。
+ * 只在这一瞬替换 require.cache，拿到模块后立刻还原，不影响别的用例（它们仍用真 ws）。
+ */
+function loadServerModuleWithSocket(FakeWebSocket, url) {
+  const wsPath = require.resolve('ws');
+  const realWs = require.cache[wsPath];
+  process.env.WEBTERM_BRIDGE_URL = url;
+  require.cache[wsPath] = { id: wsPath, filename: wsPath, loaded: true, exports: FakeWebSocket };
+  delete require.cache[require.resolve('../mcp-server.js')];
+  try {
+    return require('../mcp-server.js');
+  } finally {
+    require.cache[wsPath] = realWs;
+  }
 }
 
 test('两个客户端实例的请求 id 集合不相交（多会话不撞车）', async t => {
@@ -275,6 +339,88 @@ test('桥断开后客户端不抛异常，并自行退避重连成功', async t 
 
   const again = await client.request('serial', 'status', {});
   assert.strictEqual(again.ok, true, '重连后请求应恢复');
+});
+
+// 这条守的是"连接失败后仍要重试"。测试者常写的朴素修法是
+// `if (state.ws !== ws) return;`（用身份判断代替状态判断），那会漏掉这条路径：
+// 首次连不上桥时 socket 从未 open，state.ws 恒为 null，于是清理与重连被整个跳过，
+// 客户端永远不再重试——修一个罕见竞态时打断了最常见的故障恢复路径。
+// 注意它与上一条的区别：上一条的 socket 曾经 open 过（state.ws === ws）。
+test('连接失败（socket 从未 open）后仍会安排重试并连上', async t => {
+  const stub = await startBridgeStub();
+  t.after(stub.teardown);
+  stub.rejectNextAttempts(1);   // 首次握手被 403 拒 ⇒ 该 socket 永远 open 不了
+
+  const M2 = loadServerModule(stub.url);
+  const client = M2.createBridgeClient();
+
+  await assert.rejects(client.request('serial', 'status', {}), /403/,
+    '首次请求应因握手被拒而失败');
+
+  // 关键：这次失败必须真的排下重试（首级退避 500ms）
+  const reconnected = await waitFor(() => stub.connectionCount() > 0, 5000);
+  assert.ok(reconnected,
+    '连接失败后必须仍安排重试，否则 state.ws 恒为 null 的客户端永远恢复不了');
+
+  const res = await client.request('serial', 'status', {});
+  assert.strictEqual(res.ok, true, '重试连上后请求应成功');
+});
+
+// 一个已被取代的 socket 关闭时，不得处置不属于它的状态。
+// 触发时序（桥重启 + 并发调用就会出现）：A 进入 CLOSING → 请求另建 B → A 的 close 才派发。
+// 无条件清理的版本会把 state.ws 清成 null 并 reject 掉跑在 B 上的在途请求；症状还会
+// 自我复制：下一个请求再建 C，B 沦为真正的孤儿，它关闭时又去弄挂 C。
+test('被取代的 socket 关闭时不得清空 state.ws，也不得弄挂别人的在途请求', async () => {
+  const { FakeWebSocket, created } = makeFakeSocketClass();
+  const M2 = loadServerModuleWithSocket(FakeWebSocket, 'ws://127.0.0.1:1/bridge');
+  const client = M2.createBridgeClient();
+
+  // 1) 首个请求建立 A，并让它成为当前连接
+  const p1 = client.request('serial', 'status', {});
+  assert.strictEqual(created.length, 1, '首个请求应建立一条连接');
+  const A = created[0];
+  A.open();
+  await drainMicrotasks();
+  A.deliver(P.makeRes(JSON.parse(A.sent[0]).id, { connected: true }));
+  assert.strictEqual((await p1).ok, true, 'A 上的请求应正常完成');
+
+  // 2) A 进入 CLOSING，但 close 尚未派发——这就是真实 ws 里几微秒的那个窗口
+  A.readyState = 2;
+
+  // 3) 此刻到来的请求只能另建 B（A 已不是可用连接）
+  const p2 = client.request('serial', 'status', {});
+  assert.strictEqual(created.length, 2, 'A 处于 CLOSING 时新请求应另建连接 B');
+  const B = created[1];
+  B.open();
+  await drainMicrotasks();
+  const reqB = JSON.parse(B.sent[0]);
+
+  // 4) 现在才派发 A 的 close：A 已被 B 取代，无权处置 B 的在途请求。
+  //    拒绝分支不外抛——否则那条 reject 会变成 unhandledRejection，把下面这条
+  //    带诊断信息的断言盖掉，失败只剩一句"桥连接已断开"。
+  let outcome = 'pending';
+  const observed = p2.then(
+    r => { outcome = 'ok'; return r; },
+    e => { outcome = 'err: ' + e.message; return null; },
+  );
+  A.readyState = 3;
+  A.emit('close');
+  await drainMicrotasks();
+  assert.strictEqual(outcome, 'pending',
+    'A 的 close 不得 reject 跑在 B 上的在途请求——那正是"请求莫名失败"的来源');
+
+  // 5) B 照常回帧，B 的在途请求应不受影响
+  B.deliver(P.makeRes(reqB.id, { connected: true }));
+  const r2 = await observed;
+  assert.strictEqual(r2 && r2.ok, true, 'B 上的在途请求应不受 A 的 close 影响');
+
+  // 6) state.ws 仍应指向 B：再发一个请求不该再建连接
+  const p3 = client.request('serial', 'status', {});
+  assert.strictEqual(created.length, 2,
+    'state.ws 应仍指向 B——A 的 close 把它清成了 null，下一个请求就会另建连接');
+  await drainMicrotasks();
+  B.deliver(P.makeRes(JSON.parse(B.sent[B.sent.length - 1]).id, { connected: true }));
+  assert.strictEqual((await p3).ok, true, 'B 仍应可用');
 });
 
 // ════════════════════════════════════════════════════════
