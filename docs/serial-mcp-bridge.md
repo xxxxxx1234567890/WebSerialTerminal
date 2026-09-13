@@ -186,7 +186,7 @@ AI 拿到的不是裸错误码，而是翻译过的人话。下表是对照：
 | 错误码 | 含义 | 该怎么办 |
 |---|---|---|
 | `NEEDS_USER_GESTURE` | 没有已授权端口，浏览器要求用户手势 | **停下请用户点一次页面「连接」按钮**；重试无效 |
-| `PORT_BUSY` | 物理端口被另一套串口栈占用（典型是 Modbus 独立串口正持着它） | 先断开占用方（`serial_disconnect` / `modbus_control {action:"disconnect"}`）再重试。**不要**为了腾端口把 Modbus 切到 `shared`——它并不释放端口，而且 shared 模式下 `modbus_request` 收不到响应（见 §8 的说明） |
+| `PORT_BUSY` | 物理端口被另一套串口栈占用（典型是 Modbus 独立串口正持着它） | 先断开占用方（`serial_disconnect` / `modbus_control {action:"disconnect"}`）再重试。**不要**为了腾端口把 Modbus 切到 `shared`——切过去确实会断开独立串口、腾出端口，但代价是终端读循环被冻结、`modbus_request` 随之不可用（见 §8 的说明），因此不推荐 |
 | `PAGE_NOT_CONNECTED` | 桥上没有页面 | 请用户打开提示里给出的那个地址（默认 `http://localhost:1982`；换过端口时会自动跟着变） |
 | `BRIDGE_TIMEOUT` | 页面未在 10s 内响应 | 页面可能卡住；先用 `webterm_status` 探活 |
 | `PORT_NOT_CONNECTED` | 端口没开 | 先 `serial_connect` |

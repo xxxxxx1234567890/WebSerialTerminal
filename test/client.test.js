@@ -353,3 +353,25 @@ test('桥脚本按 bridge-protocol → fake-serial → bridge-client 的顺序�
     '三个 script 必须是 protocol → fake → client 的先后顺序，实际 ' + [iProto, iFake, iClient].join('/'));
 });
 
+// ════════════════════════════════════════════════════════
+// 七、PORT_BUSY 文案的事实依据
+//
+// mcp-server.js 的 PORT_BUSY 文案与 docs/serial-mcp-bridge.md §6 都断言
+// 「切到 shared 会断开独立串口、腾出端口」。这不是修辞而是页面行为，
+// 所以钉行为、不钉文案：一旦页面不再断开，"腾出端口"就成了假话，
+// 而这句话此前正是以"无任何测试断言"的方式活在两个交付物里。
+// ════════════════════════════════════════════════════════
+
+test('离开 independent 模式会断开 Modbus 独立串口（PORT_BUSY 文案的事实依据）', () => {
+  const setMode = extractFn('modbusSetMode');
+  assert.ok(setMode, '应存在 modbusSetMode()');
+  assert.match(setMode, /modbusPortMode\s*===\s*'independent'[\s\S]*?modbusDisconnectPort\s*\(/,
+    '离开 independent 必须调用 modbusDisconnectPort()；否则 PORT_BUSY 文案不得再声称"切 shared 会腾出端口"');
+
+  // 断开必须真的关上串口。只调函数名不关端口的话，"腾出端口"同样不成立。
+  const disconnect = extractFn('modbusDisconnectPort');
+  assert.ok(disconnect, '应存在 modbusDisconnectPort()');
+  assert.match(disconnect, /modbusPort\.close\(\)/,
+    'modbusDisconnectPort 必须关闭 modbusPort，"腾出端口"才成立');
+});
+

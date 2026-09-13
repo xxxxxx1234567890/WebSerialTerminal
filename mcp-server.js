@@ -159,10 +159,12 @@ const pageOrigin = () => {
 
 const ERROR_TEXT = {
   NEEDS_USER_GESTURE: () => '✖ 无法连接：浏览器要求用户手动授权串口（首次连接必须真人点一下页面上的"连接"按钮）。重试不会有帮助——请让用户操作完成后再继续。',
-  // 这条文案曾建议"切 Modbus 到 shared 复用终端端口"来腾出串口——那是一条死路：
-  // shared 只让 Modbus 复用终端端口，既解决不了占用，而且 shared 模式下
-  // modbus_request 收不到任何响应（终端读循环被冻结）。改为指向真正的占用方。
-  PORT_BUSY: (m) => `✖ 串口被占用：${m}\n同一物理端口同一时刻只能被一套串口栈持有。请先断开占用方（serial_disconnect，或 modbus_control {action:"disconnect"}）再重试——重试本身不会让它变好。\n不要改用 shared 模式来绕开：它并不释放端口，而且 shared 模式下 modbus_request 收不到响应。`,
+  // 这条文案曾建议"切 Modbus 到 shared 复用终端端口"来腾出串口，并给出理由"它并不
+  // 释放端口"——**那个理由是假的**：切 shared 时 modbusSetMode 会断开独立串口
+  // （modbusDisconnectPort → port.close()），端口确实腾得出来。政策（不推荐这条
+  // 路）仍然成立，但依据只能是不划算：终端读循环会被冻结，modbus_request 随之不可用。
+  // 那段"事实依据"由 test/client.test.js 钉在页面源码上——页面不再断开时该断言变红。
+  PORT_BUSY: (m) => `✖ 串口被占用：${m}\n同一物理端口同一时刻只能被一套串口栈持有。请先断开占用方（serial_disconnect，或 modbus_control {action:"disconnect"}）再重试——重试本身不会让它变好。\n切到 shared 会断开独立串口从而腾出端口，但那样终端读循环会被冻结、modbus_request 也就不可用了，因此不推荐。`,
   PAGE_NOT_CONNECTED: () => `✖ 页面未连接。请确认用户已在浏览器打开 ${pageOrigin()} ，且页面上的桥连接正常。`,
   BRIDGE_TIMEOUT: (m) => `✖ 页面响应超时：${m}\n页面可能正忙或已卡死。可先用 webterm_status 判断页面是否还在响应。`,
   PORT_NOT_CONNECTED: (m) => `✖ 串口未连接：${m}\n请先调用 serial_connect。`,
