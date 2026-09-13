@@ -2872,6 +2872,10 @@ function createBridgeClient() {
   const state = { ws: null, seq: 0, pending: new Map(), retryMs: 500,
                   // 每个适配器进程一个随机标签，用于保证请求 id 全局唯一
                   tag: require('node:crypto').randomBytes(4).toString('hex') };
+  // 注意上面这行的注释块：id 必须【全局】唯一，不是"适配器内唯一"——
+  // 桥的请求表是全桥共享的一张 map，其冲突守卫会响亮拒绝重复 id，
+  // 而两个 Claude Code 会话各起一个适配器、若都从 r-1 开始则必然撞车。
+  // 多适配器正是这个桥挂在长驻 server.js 里（而非住在适配器进程里）的全部理由。
 
   function ensure() {
     if (state.ws && state.ws.readyState === 1) return Promise.resolve(state.ws);
@@ -2903,7 +2907,12 @@ function createBridgeClient() {
         state.ws = null;
         for (const [, p] of state.pending) p.reject(new Error('桥连接已断开'));
         state.pending.clear();
-        setTimeout(ensure, state.retryMs).catch(() => {});
+        // 注意 setTimeout 返回的是 Timeout 对象、不是 Promise：写成
+        // setTimeout(ensure, ms).catch(…) 会在本处理器里同步抛 TypeError，
+        // 未捕获 → 桥每次断开都让 MCP 进程崩溃，且下面的退避递增永不执行。
+        // 必须把回调包起来再等它的 Promise。计时器还要 unref，否则待决的重连
+        // 会吊住事件循环、让进程无法自然退出。
+        setTimeout(() => { ensure().catch(() => {}); }, state.retryMs).unref();
         state.retryMs = Math.min(state.retryMs * 2, 10000);
       });
       ws.on('error', err => {
