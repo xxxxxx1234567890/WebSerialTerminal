@@ -6,7 +6,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const {
-  makeRingBuffer, normalizeSendArgs, classifyWrite, isWriteOp, parseWriteData,
+  makeRingBuffer, normalizeSendArgs, classifyWrite, isWriteOp,
+  normalizeWriteData, describeWrite,
 } = require('../bridge-client.js');
 
 // ════════════════════════════════════════════════════════
@@ -110,20 +111,40 @@ test('isWriteOp 看穿 ui.action 的多态：list_macros 是读、run_macro 是�
 // 四、Modbus 写数据解析（重建页面将要发送的帧）
 // ════════════════════════════════════════════════════════
 
-test('parseWriteData 对 FC5/6 产出 16 位整数，对 FC15/16 产出字节数组', () => {
-  // 必须与 modbusSend() 从 #mbWriteData 的解析完全一致，
+test('normalizeWriteData 对 FC5/6 产出 16 位整数，对 FC15/16 产出字节数组', () => {
+  // value 必须与 modbusSend() 从 #mbWriteData 解析出的形状一致，
   // 否则回给 AI 的 txHex 与实际上线缆的字节不同
-  assert.strictEqual(parseWriteData(5, 'FF 00'), 0xFF00);
-  assert.strictEqual(parseWriteData(6, '00 0A'), 0x000A);
-  assert.strictEqual(parseWriteData(6, '01,02'), 0x0102);
-  assert.deepStrictEqual(Array.from(parseWriteData(15, '01 03')), [0x01, 0x03]);
+  assert.strictEqual(normalizeWriteData(5, 'FF 00').value, 0xFF00);
+  assert.strictEqual(normalizeWriteData(6, '00 0A').value, 0x000A);
+  assert.strictEqual(normalizeWriteData(6, '01,02').value, 0x0102);
+  assert.deepStrictEqual(Array.from(normalizeWriteData(15, '01 03').value), [0x01, 0x03]);
   assert.deepStrictEqual(
-    Array.from(parseWriteData(16, '00 64 00 C8')), [0x00, 0x64, 0x00, 0xC8]);
+    Array.from(normalizeWriteData(16, '00 64 00 C8').value), [0x00, 0x64, 0x00, 0xC8]);
 });
 
-test('parseWriteData 的结果能被 modbusConstructFrame 正确编码进帧', () => {
+test('normalizeWriteData 回吐给页面的 text 必须是空格分隔的字节', () => {
+  // 页面是按 token 逐个 parseInt(,16) 解析 #mbWriteData 的：
+  // '000a' 会被当成一个 token，b[1] 变 undefined → 帧里成 0。
+  // 所以回填的字符串必须是 '00 0a' 这种形式，不能是连写。
+  assert.strictEqual(normalizeWriteData(6, '000A').text, '00 0a', '连写要拆成字节');
+  assert.strictEqual(normalizeWriteData(6, '0x00,0x0A').text, '00 0a');
+  assert.strictEqual(normalizeWriteData(16, '00 64 00 C8').text, '00 64 00 c8');
+  // 页面用同一份 text 解析出的字节必须与 value 一致
+  const back = normalizeWriteData(6, normalizeWriteData(6, '000A').text).value;
+  assert.strictEqual(back, 0x000A, 'text 回灌页面后必须解析出同一组字节');
+});
+
+test('normalizeWriteData 对非法写数据抛出可读错误（而不是静默产出零值帧）', () => {
+  assert.throws(() => normalizeWriteData(6, 'ZZ'), /writeData/, '非十六进制应报错');
+  assert.throws(() => normalizeWriteData(6, '00 0'), /writeData/, '奇数长度应报错');
+  assert.throws(() => normalizeWriteData(6, ''), /writeData/, '空值应报错');
+  assert.throws(() => normalizeWriteData(6, '00 0A 0B'), /2 字节/, 'FC6 必须是 16 位值');
+  assert.throws(() => normalizeWriteData(5, 'AA'), /2 字节/, 'FC5 必须是 16 位值');
+});
+
+test('normalizeWriteData 的结果能被 modbusConstructFrame 正确编码进帧', () => {
   // 复刻页面 modbusConstructFrame 对 FC6 的分支：地址与数据各两字节，再补 CRC
-  const frame = buildFrame(6, 0x0001, 0x0002, parseWriteData(6, '00 02'));
+  const frame = buildFrame(6, 0x0001, 0x0002, normalizeWriteData(6, '00 02').value);
   assert.deepStrictEqual(Array.from(frame.slice(0, 6)),
     [0x01, 0x06, 0x00, 0x01, 0x00, 0x02], '从站/功能码/地址/数据须按序落到线缆字节上');
 });
@@ -134,3 +155,94 @@ function buildFrame(funcCode, address, _quantity, writeData) {
     (writeData >> 8) & 0xFF, writeData & 0xFF];
   return new Uint8Array(buf.concat([0, 0]));
 }
+
+// ════════════════════════════════════════════════════════
+// 五、审计覆盖
+//
+// spec 第 5.5 节把 [AI] 审计轨迹定为"不做逐次确认"的唯一补偿控制
+// （design 第 7.2 节）。因此覆盖必须是每个写入操作都有的结构性保证——
+// dispatcher 会在每个写操作前调用 describeWrite，这里的断言就是那份保证。
+// ════════════════════════════════════════════════════════
+
+/** 所有写入类操作的 (domain, op, args, form) 四元组，新增写操作时应同步加入 */
+const WRITE_CASES = [
+  ['serial', 'connect', { index: 0 }, {}],
+  ['serial', 'connect', {}, {}],
+  ['serial', 'disconnect', {}, {}],
+  ['serial', 'send', { data: 'AT' }, {}],
+  ['serial', 'set_params', { baudRate: 115200 }, {}],
+  ['modbus', 'control', { action: 'set_mode', mode: 'independent' }, {}],
+  ['modbus', 'control', { action: 'connect', index: 1 }, {}],
+  ['modbus', 'control', { action: 'disconnect' }, {}],
+  ['modbus', 'control', { action: 'activate' }, {}],
+  ['modbus', 'control', { action: 'deactivate' }, {}],
+  ['modbus', 'control', { action: 'cycle_start' }, { slaveId: '1', funcCode: '3', address: '0', quantity: '10', cycleIntervalMs: '1000' }],
+  ['modbus', 'control', { action: 'cycle_stop' }, {}],
+  ['modbus', 'request', { slaveId: 1, funcCode: 3, address: 0, quantity: 10 }, {}],
+  ['modbus', 'request', { slaveId: 1, funcCode: 6, address: 0, quantity: 1, writeData: '00 0A' }, {}],
+  ['ui', 'action', { action: 'clear' }, {}],
+  ['ui', 'action', { action: 'pause' }, {}],
+  ['ui', 'action', { action: 'resume' }, {}],
+  ['ui', 'action', { action: 'set_theme', theme: 'amber' }, {}],
+  ['ui', 'action', { action: 'set_font', size: 18 }, {}],
+  ['ui', 'action', { action: 'toggle_sidebar' }, {}],
+  ['ui', 'action', { action: 'run_macro', name: 'AT' }, {}],
+  ['ui', 'action', { action: 'save_log' }, {}],
+  ['dev', 'serial_source', { mode: 'fake' }, {}],
+  ['dev', 'fake_inject', { data: '41' }, {}],
+  ['dev', 'fake_script', { rules: [{ matchHex: '01', respondHex: '02' }] }, {}],
+];
+
+test('每个写入类操作都有非空审计描述', () => {
+  for (const [d, o, a, f] of WRITE_CASES) {
+    const desc = describeWrite(d, o, a, f);
+    assert.strictEqual(typeof desc, 'string', `${d}.${o} 必须有审计描述`);
+    assert.ok(desc.trim().length > 0, `${d}.${o} 的审计描述不能为空`);
+  }
+});
+
+test('读取类操作不产生审计行', () => {
+  for (const [d, o, a] of [['serial', 'status'], ['serial', 'read'], ['modbus', 'status'],
+    ['modbus', 'log'], ['ui', 'inspect'], ['dev', 'fake_capture']]) {
+    assert.strictEqual(describeWrite(d, o, a || {}, {}), null, `${d}.${o} 是只读，不该审计`);
+  }
+  assert.strictEqual(describeWrite('ui', 'action', { action: 'list_macros' }, {}), null,
+    'ui_action list_macros 是只读');
+  assert.strictEqual(describeWrite('ui', 'inspect', {}, {}), null, 'ui.inspect 是只读');
+});
+
+test('最高危的"启动轮询"审计行必须说清对谁发什么', () => {
+  // 轮询会持续对真实硬件发报文，而终端里本来零痕迹——行里没有这些，
+  // 事后就无从追溯，"不做逐次确认"这个决策的前提也就没了
+  const desc = describeWrite('modbus', 'control', { action: 'cycle_start' },
+    { slaveId: '1', funcCode: '3', address: '0', quantity: '10', cycleIntervalMs: '1000' });
+  for (const frag of ['轮询', 'slave=1', 'fc=3', 'addr=0', 'qty=10', '1000']) {
+    assert.ok(desc.includes(frag), `审计行应含「${frag}」，实际: ${desc}`);
+  }
+});
+
+test('审计行能看出"对硬件做了什么"：连接/发送/写寄存器带上目标与载荷', () => {
+  assert.match(describeWrite('serial', 'connect', { index: 1 }, {}), /index=1/);
+  assert.match(describeWrite('serial', 'send', { data: '4142', encoding: 'hex' }, {}), /4142/,
+    '发送类审计应带实际字节的十六进制');
+  const req = describeWrite('modbus', 'request',
+    { slaveId: 2, funcCode: 6, address: 16, quantity: 1, writeData: '00 0A' }, {});
+  for (const frag of ['slave=2', 'fc=6', 'addr=16', 'qty=1', '00 0A']) {
+    assert.ok(req.includes(frag), `写寄存器审计应含「${frag}」，实际: ${req}`);
+  }
+  assert.match(describeWrite('dev', 'fake_inject', { data: '41' }, {}), /41（hex）/,
+    '按默认 hex 渲染，与 schema 默认值一致');
+});
+
+test('审计描述在参数缺失或非法时也不抛（审计行不得因参数问题消失）', () => {
+  // 参数非法恰恰是最该留痕的时候；审计本身若抛，dispatcher 会把整条请求
+  // 变成 PAGE_ERROR，反而连"有人试过"都记不下来
+  for (const [d, o, a] of [['serial', 'send', {}], ['serial', 'send', { data: 'ZZ', encoding: 'hex' }],
+    ['dev', 'fake_inject', {}], ['modbus', 'request', {}], ['ui', 'action', {}]]) {
+    assert.doesNotThrow(() => describeWrite(d, o, a, {}), `${d}.${o} 的审计描述不得抛`);
+  }
+  assert.match(describeWrite('serial', 'send', { data: 'ZZ', encoding: 'hex' }, {}), /无法按 hex 编码/,
+    '编码失败时应退回原文而不是抛');
+  assert.match(describeWrite('modbus', 'control', { action: 'cycle_start' }, {}), /slave=\?/,
+    '表单读不到时用占位符而不是 undefined');
+});

@@ -85,21 +85,118 @@
   }
 
   const MODBUS_WRITE_FUNCS = [5, 6, 15, 16];
+  const MODBUS_FUNCS = [1, 2, 3, 4, 5, 6, 15, 16];
 
   /**
-   * 复刻 modbusSend() 从 #mbWriteData 解析写数据的规则，用来在页面之外重建
-   * 它即将发送的帧（见 modbus.request 的 txHex）。必须与页面完全一致——
-   * 回给 AI 的 txHex 若与实际上线缆的字节不同，比不返回更糟：
-   * AI 会拿它去追一个并不存在的差异。
-   * modbusConstructFrame 对 FC5/6 取 16 位整数，对 FC15/16 取字节数组。
+   * 解析并规范化 Modbus 写数据。页面 #mbWriteData 是按 token 逐个 parseInt(,16) 解析的，
+   * 所以 '000A' 这种连写会被它当成一个 token（第二个字节变 undefined → 帧里成 0）。
+   * 这里统一解析成字节再回吐给页面的规范形式（空格分隔的字节），保证页面解析出的
+   * 字节与桥侧重建的帧完全一致。
+   *
+   * 校验在桥侧做，不改既有的 modbusSend()：非法参数应当得到 INVALID_ARGS，
+   * 而不是把字面量 "undefined" 写进用户可见的表单再等 1500ms 超时。
    */
-  function parseWriteData(funcCode, raw) {
-    const tokens = String(raw).trim().split(/[\s,]+/).map(s => parseInt(s, 16));
-    return funcCode <= 6 ? (tokens[0] << 8 | tokens[1]) : new Uint8Array(tokens);
+  function normalizeWriteData(funcCode, raw) {
+    let bytes;
+    try {
+      bytes = P.hexToBytes(String(raw).trim());
+    } catch (e) {
+      throw new Error('writeData 必须是十六进制字节（如 "00 0A" / "000A" / "0x00,0x0A"）：' + e.message);
+    }
+    if (funcCode === 5 || funcCode === 6) {
+      if (bytes.length !== 2) {
+        throw new Error(`功能码 ${funcCode} 的 writeData 必须正好 2 字节（16 位值），收到 ${bytes.length} 字节`);
+      }
+      return { text: Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' '), value: (bytes[0] << 8) | bytes[1] };
+    }
+    return {
+      text: Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' '),
+      // modbusConstructFrame 对 FC5/6 取 16 位整数，对 FC15/16 取字节数组
+      value: bytes,
+    };
+  }
+
+  /** 渲染 send / fake_inject 的 data 供审计使用。编码失败时退回原文——
+   *  审计行是事后唯一的线索，不能因为参数本身非法就整行消失（那正是最该留痕的时候）。 */
+  function describeData(args, encoding) {
+    const a = args || {};
+    if (typeof a.data !== 'string' || a.data === '') return '（无数据）';
+    try {
+      const bytes = P.encodeToBytes(a.data, encoding);
+      let hex = '';
+      for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+      return hex + '（' + encoding + '）';
+    } catch {
+      return JSON.stringify(a.data) + '（无法按 ' + encoding + ' 编码）';
+    }
+  }
+
+  /**
+   * 写入类操作的审计描述。
+   *
+   * spec 第 5.5 节把 [AI] 轨迹定为"不做逐次确认"这个决策的唯一补偿控制
+   * （design 第 7.2 节），所以"每个写入都留痕"必须由 dispatcher 统一保证——
+   * 集中在这一处，将来新增写操作不可能漏掉；散在各个 handler 里则迟早会漏。
+   *
+   * `form` 是页面 Modbus 表单的快照（轮询参数只存在于 DOM 里，args 里没有），
+   * 由调用方读好后传入，保持本函数可脱离 DOM 单测。
+   * 返回 null 表示不是写操作（读取类无需审计）。
+   */
+  function describeWrite(domain, op, args, form) {
+    const a = args || {};
+    if (!isWriteOp(domain, op, a)) return null;
+    // 表单值缺失时用占位符：审计行宁可写 "?" 也不能写 "undefined"，
+    // 后者看起来像一个真实取值，会让事后追溯得出错误结论
+    const f = k => {
+      const v = (form || {})[k];
+      return (v === undefined || v === null || v === '') ? '?' : v;
+    };
+    const idx = Number.isInteger(a.index) ? a.index : 0;
+    switch (domain + '.' + op) {
+      case 'serial.connect': return `连接串口（已授权端口 index=${idx}）`;
+      case 'serial.disconnect': return '断开串口';
+      case 'serial.send': return '发送 ' + describeData(a, a.encoding || 'ascii');
+      case 'serial.set_params': return '记录串口参数（需断开重连才生效）';
+      case 'modbus.control': {
+        switch (a.action) {
+          case 'set_mode': return `Modbus 模式切到 ${a.mode}`;
+          case 'connect': return `Modbus 独立串口连接（已授权端口 index=${idx}）`;
+          case 'disconnect': return 'Modbus 独立串口断开';
+          case 'activate': return 'Modbus 启用';
+          case 'deactivate': return 'Modbus 停用';
+          // 轮询会持续对真实硬件发报文，而终端里本来零痕迹——这条必须带上"对谁发什么"，
+          // 否则事后无从追溯，与"不做逐次确认"的前提直接冲突
+          case 'cycle_start':
+            return `Modbus 启动轮询 slave=${f('slaveId')} fc=${f('funcCode')} addr=${f('address')}`
+                 + ` qty=${f('quantity')} 间隔=${f('cycleIntervalMs')}ms`;
+          case 'cycle_stop': return 'Modbus 停止轮询';
+          default: return 'Modbus control：' + a.action;
+        }
+      }
+      case 'modbus.request': {
+        const data = a.writeData === undefined || a.writeData === null || a.writeData === ''
+          ? '' : ' 数据=' + a.writeData;
+        return `Modbus 请求 slave=${a.slaveId} fc=${a.funcCode} addr=${a.address}`
+             + ` qty=${a.quantity}${data}`;
+      }
+      case 'ui.action': {
+        if (a.action === 'run_macro') return `执行宏「${a.name}」`;
+        if (a.action === 'set_theme') return `主题切到 ${a.theme}`;
+        if (a.action === 'set_font') return `字号切到 ${a.size}`;
+        return '界面动作 ' + a.action;
+      }
+      case 'dev.serial_source': return `串口源切到 ${a.mode}`;
+      case 'dev.fake_inject': return '假设备注入 ' + describeData(a, a.encoding || 'hex');
+      case 'dev.fake_script': return `设置 ${(a.rules || []).length} 条假设备应答规则`;
+      default: return domain + '.' + op;
+    }
   }
 
   if (isNode) {
-    return { makeRingBuffer, normalizeSendArgs, classifyWrite, isWriteOp, parseWriteData };
+    return {
+      makeRingBuffer, normalizeSendArgs, classifyWrite, isWriteOp,
+      normalizeWriteData, describeWrite, describeData,
+    };
   }
 
   // ════ 浏览器侧 ════
@@ -122,6 +219,8 @@
       pageId: (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).slice(0, 8),
       serialSource: 'real',
       fakePort: null,
+      everOpen: false,
+      warnedNoBridge: false,
       // 桥明确拒绝过我们（目前只有协议版本不匹配这一种）。这是终局状态：
       // 重连不会变好，只会每 30 秒往终端里再刷一条同样的告警。
       rejected: false,
@@ -264,6 +363,13 @@
         // 走 withAuthorizedPort：AI 免手势，绝不弹选择框（人工点按钮才弹）
         await withAuthorizedPort(args && args.index, () => connectPort());
         if (!isConnected) throw err(P.ERROR_CODES.PAGE_ERROR, '连接未成功建立');
+        // 成功后补一条带结果的审计（哪个口、多少波特）——连接失败时只有 dispatcher
+        // 那条"意图"审计，成功时两条合起来才说得清"对哪台设备做了什么"
+        const info = (port && port.getInfo) ? port.getInfo() : {};
+        const ports = info.usbVendorId
+          ? `VID:${info.usbVendorId.toString(16).toUpperCase().padStart(4, '0')}`
+          : 'Serial Port';
+        audit(`已连接 ${ports} @ ${(document.getElementById('baudRate') || {}).value} baud`);
         return { connected: true };
       },
 
@@ -279,7 +385,6 @@
         if (!isConnected || !writer) {
           throw err(P.ERROR_CODES.PORT_NOT_CONNECTED, '终端未连接串口，请先调用 serial_connect');
         }
-        audit('→ ' + P.bytesToHex(bytes));
         await writer.write(bytes);
         txBytes += bytes.length;
         updateCounters();
@@ -359,10 +464,37 @@
           throw err(P.ERROR_CODES.PAGE_ERROR, '已有 Modbus 请求在等待响应，请串行调用');
         }
 
+        // 先校验干净再碰 DOM、再写审计行。理由：字段缺省时现在会把字面量 "undefined"
+        // 写进用户可见的 Modbus 表单，并记下一帧用零值构造、从未真正发出的报文——
+        // 虚假的审计行比缺失的审计行更糟，它让事后追溯得出错误结论。
+        // 校验放在最前，非法参数得到的是 INVALID_ARGS，而不是 1500ms 之后的超时。
+        const slaveId = Number(a.slaveId), funcCode = Number(a.funcCode);
+        const address = Number(a.address), quantity = Number(a.quantity);
+        if (!Number.isInteger(slaveId) || slaveId < 1 || slaveId > 247) {
+          throw err(P.ERROR_CODES.INVALID_ARGS, `slaveId 必须是 1-247 的整数，收到 ${JSON.stringify(a.slaveId)}`);
+        }
+        if (!MODBUS_FUNCS.includes(funcCode)) {
+          throw err(P.ERROR_CODES.INVALID_ARGS, `funcCode 必须是 ${MODBUS_FUNCS.join('/')} 之一，收到 ${JSON.stringify(a.funcCode)}`);
+        }
+        if (!Number.isInteger(address) || address < 0 || address > 65535) {
+          throw err(P.ERROR_CODES.INVALID_ARGS, `address 必须是 0-65535 的整数，收到 ${JSON.stringify(a.address)}`);
+        }
+        if (!Number.isInteger(quantity) || quantity < 1 || quantity > 2000) {
+          throw err(P.ERROR_CODES.INVALID_ARGS, `quantity 必须是 1-2000 的整数，收到 ${JSON.stringify(a.quantity)}`);
+        }
+        let write = null;
+        if (MODBUS_WRITE_FUNCS.includes(funcCode)) {
+          if (a.writeData === undefined || a.writeData === null || a.writeData === '') {
+            throw err(P.ERROR_CODES.INVALID_ARGS, `功能码 ${funcCode} 需要 writeData（十六进制，如 "00 0A"）`);
+          }
+          try { write = normalizeWriteData(funcCode, a.writeData); }
+          catch (e) { throw err(P.ERROR_CODES.INVALID_ARGS, e.message); }
+        }
+
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = String(v); };
-        set('mbSlaveId', a.slaveId);
-        set('mbFuncCode', a.funcCode);
-        set('mbQuantity', a.quantity);
+        set('mbSlaveId', slaveId);
+        set('mbFuncCode', funcCode);
+        set('mbQuantity', quantity);
         // 地址必须按 DEC 解析：modbusParseAddress() 看 modbusAddrHex 决定进制。
         // 两个地址模式复选框要一起置成 DEC 再同步——modbusViewSyncAddrMode() 会用
         // #mvAddrMode 覆盖 #mbAddrMode 并重算 modbusAddrHex，只写变量会被它改回去，
@@ -371,14 +503,14 @@
         if (mvAddrMode) mvAddrMode.checked = false;
         modbusAddrHex = false;
         if (typeof modbusViewSyncAddrMode === 'function') modbusViewSyncAddrMode();
-        set('mbAddress', a.address);
-        if (a.writeData !== undefined && a.writeData !== null) set('mbWriteData', a.writeData);
+        set('mbAddress', address);
+        // 回填的是规范化后的字节串（空格分隔），页面按同样的形式解析出同样的字节
+        if (write) set('mbWriteData', write.text);
         if (typeof modbusOnFuncCodeChange === 'function') modbusOnFuncCodeChange();
 
-        const writeData = (MODBUS_WRITE_FUNCS.includes(Number(a.funcCode)) && a.writeData)
-          ? parseWriteData(Number(a.funcCode), a.writeData)
-          : null;
-        const frame = modbusConstructFrame(a.slaveId, a.funcCode, a.address, a.quantity, writeData);
+        const frame = modbusConstructFrame(slaveId, funcCode, address, quantity,
+          write ? write.value : null);
+        // 这条是线缆级真相（实际字节），dispatcher 的统一审计行给不出，故保留
         audit('Modbus → ' + P.bytesToHex(frame));
 
         const captured = await new Promise((resolve, reject) => {
@@ -465,7 +597,6 @@
                 `找不到宏「${args.name}」。现有宏：${names || '（无）'}`);
             }
             await sendData(m.cmd);
-            audit(`宏「${m.label}」→ ${m.cmd}`);
             return { ran: m.label, command: m.cmd };
           }
           case 'list_macros':
@@ -516,7 +647,6 @@
           };
           state.serialSource = 'fake';
           state.fakePort = fake;
-          audit('串口源已切到假设备');
         } else if (mode === 'real') {
           if (state.fakePort && isConnected) await disconnectPort();
           // 直接引用页面声明的真实实现，不在这里重写一份——
@@ -524,7 +654,6 @@
           serialProvider = root.realSerialProvider;
           state.fakePort = null;
           state.serialSource = 'real';
-          audit('串口源已切回真实设备');
         } else {
           throw err(P.ERROR_CODES.INVALID_ARGS, 'mode 必须是 real 或 fake');
         }
@@ -533,9 +662,14 @@
 
       'dev.fake_inject': async args => {
         requireFake();
-        const { bytes } = normalizeSendArgs(args);
+        const a = args || {};
+        // 这里的默认值必须是 hex，与 dev_serial 工具 schema 声明的 default 一致。
+        // dispatchTool 不会把 schema 默认值 materialize 进 args，默认值只能在页面侧落实；
+        // 若沿用 normalizeSendArgs 的 ascii，文档化的 {data:'41'} 会注入 0x34 0x31，
+        // 静默匹配不上任何 fake_script 规则，症状是"设备从不回应"，极难归因。
+        // （serial.send 的默认仍是 ascii——那是它 schema 声明的默认值，两者不可混同。）
+        const { bytes } = normalizeSendArgs({ data: a.data, encoding: a.encoding || 'hex' });
         state.fakePort.injectBytes(bytes);
-        audit('假设备注入 ' + P.bytesToHex(bytes));
         return { injected: bytes.length };
       },
 
@@ -560,6 +694,20 @@
     }
 
     // ── 请求处理 ──
+    /** 页面 Modbus 表单快照。轮询参数只存在于 DOM 里（args 里没有），
+     *  而"启动轮询"恰恰是最需要留痕的写入 —— 交给纯函数 describeWrite 使用。 */
+    function readModbusForm() {
+      const val = id => {
+        const el = document.getElementById(id);
+        return el ? el.value : '?';
+      };
+      return {
+        slaveId: val('mbSlaveId'), funcCode: val('mbFuncCode'),
+        address: val('mbAddress'), quantity: val('mbQuantity'),
+        cycleIntervalMs: val('mvCycleInterval'),
+      };
+    }
+
     async function handleReq(msg) {
       const opKey = `${msg.domain}.${msg.op}`;
       const handler = OPS[opKey];
@@ -570,24 +718,45 @@
       if (!caps.includes(msg.domain)) {
         return P.makeErr(msg.id, P.ERROR_CODES.OP_UNSUPPORTED, `本页面不支持域 ${msg.domain}`);
       }
-      if (isWriteOp(msg.domain, msg.op, msg.args) && !isArmed()) {
-        return P.makeErr(msg.id, P.ERROR_CODES.NOT_ARMED,
-          'AI 写入未启用。请在页面上打开"允许 AI 写入"开关后重试（读取类操作不受限制）。');
+      if (isWriteOp(msg.domain, msg.op, msg.args)) {
+        if (!isArmed()) {
+          return P.makeErr(msg.id, P.ERROR_CODES.NOT_ARMED,
+            'AI 写入未启用。请在页面上打开"允许 AI 写入"开关后重试（读取类操作不受限制）。');
+        }
+        // 审计在这里集中做，不下放到各 handler：spec 第 5.5 节把 [AI] 轨迹定为
+        // "不做逐次确认"的唯一补偿控制，覆盖必须是结构性的——散着写迟早会漏掉一个，
+        // 而漏掉的那个（比如"启动轮询"）正是事后唯一说不清的操作。
+        // 审计行本身不得因参数问题消失，故 describeWrite 保证不抛。
+        audit(describeWrite(msg.domain, msg.op, msg.args, readModbusForm()));
       }
       try {
         const data = await handler(msg.args || {});
         return P.makeRes(msg.id, data);
       } catch (e) {
         const code = P.isErrorCode(e && e.code) ? e.code : P.ERROR_CODES.PAGE_ERROR;
-        return P.makeErr(msg.id, code, (e && e.message) || String(e));
+        const message = (e && e.message) || String(e);
+        // 写操作失败必须补一条结果行：只有"意图"行而无结果行，事后会把一次被拒的
+        // 请求读成真的发出去过——虚假的审计记录比缺失的记录更糟（同 modbus.request 的校验顺序）。
+        if (isWriteOp(msg.domain, msg.op, msg.args)) audit('✖ 失败：' + message);
+        return P.makeErr(msg.id, code, message);
       }
     }
 
     // ── WS 连接与重连 ──
+    /** WS URL 从 location 推导，不写死 ws://：页面按 CLAUDE.md 可以用 https 打开
+     *  （server.js 也接受 https 来源），而 https 页面连 ws:// 会被混合内容策略直接拦掉——
+     *  表现为"永远连不上且在无限重试"，终端里却一个字都没有。 */
+    function bridgeUrl() {
+      const scheme = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss:' : 'ws:';
+      const host = (typeof location !== 'undefined' && location.host) ? location.host : 'localhost';
+      return `${scheme}//${host}/bridge`;
+    }
+
     function connectBridge() {
       let ws;
+      const url = bridgeUrl();
       try {
-        ws = new WebSocket(`ws://${location.host}/bridge`);
+        ws = new WebSocket(url);
       } catch (e) {
         scheduleRetry();
         return;
@@ -596,6 +765,7 @@
 
       ws.onopen = () => {
         state.retryMs = 1000;
+        state.everOpen = true;
         try {
           ws.send(JSON.stringify({
             kind: 'hello', role: 'page', pageId: state.pageId,
@@ -629,7 +799,17 @@
         }
       };
 
-      ws.onclose = () => { state.ws = null; scheduleRetry(); };
+      ws.onclose = () => {
+        state.ws = null;
+        // 从没连上过就说一声，且只说一次：端口不符、混合内容拦截、服务端没装依赖
+        // 都会让重连永远失败，而"终端里什么都没发生"让人根本想不到问题出在桥这一侧。
+        // 只报一次是为了不刷屏；不弹错误、不阻塞 UI 的约束照旧。
+        if (!state.everOpen && !state.warnedNoBridge) {
+          state.warnedNoBridge = true;
+          audit(`未能连接本机 AI 桥（${url}），AI 控制不可用；终端自身功能不受影响`);
+        }
+        scheduleRetry();
+      };
       ws.onerror = () => { try { ws.close(); } catch { /* 忽略 */ } };
     }
 
