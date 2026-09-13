@@ -2750,6 +2750,10 @@ async function dispatchTool(name, args, request) {
 module.exports = { buildTools, dispatchTool, translateError, TOOL_MAP };
 ```
 
+> **注意：上面 `PORT_BUSY` 的文案与已交付版本不同。** 它给出的理由"切到 shared 复用终端端口"**在写成时就是假的**——不是滞后于实现，页面从一开始就是这个行为：`modbusSetMode` 在离开 `independent` 时会调 `modbusDisconnectPort()`（`WebSerialTerminal.html:4682-4684`），后者 `await modbusPort.close()`（`:4768-4795`），端口确实腾得出来。该文案已据此在 `mcp-server.js`（含其上方注释）、`docs/serial-mcp-bridge.md`、设计 spec 中更正。
+>
+> 不推荐 shared 的真实理由与"释不释放端口"无关：shared 会冻结终端读循环，`modbus_request` 随之不可用（守卫见 `bridge-client.js:566-577`）。**以已交付的文案为准**——照抄上面那段会把这条假话重新引入。
+
 > 注意：`dev_serial` 的映射把整个 `args`（含 `action`）作为 payload 传出，因为页面侧按 `dev.<action>` 分派。页面 dispatcher（Task 8）里的 `dev.serial_source` / `dev.fake_inject` / `dev.fake_capture` / `dev.fake_script` 与此一一对应。
 
 - [ ] **Step 4: 运行测试确认通过**
