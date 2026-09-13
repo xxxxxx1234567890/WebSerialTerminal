@@ -3,3 +3,7 @@ node_modules/
 *.bak
 start.vbs
 .worktrees/
+
+# 桥 token 目录。默认写在用户主目录之外（仓库外），
+# 仅当 WEBTERM_HOME 被指到仓库内时才可能落到这里，属防御性忽略
+.webterm/

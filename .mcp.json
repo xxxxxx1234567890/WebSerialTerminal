@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "webterm-serial": {
+      "command": "node",
+      "args": ["mcp-server.js"],
+      "env": {}
+    }
+  }
+}
